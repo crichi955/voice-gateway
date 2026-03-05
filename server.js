@@ -15,9 +15,21 @@ wss.on("connection", (ws) => {
   console.log("✅ Twilio WS connected");
   let mediaCount = 0;
 
-  ws.on("message", (msg) => {
-    try {
-      const evt = JSON.parse(msg.toString());
+ws.on("message", async (msg) => {
+  const text =
+    Buffer.isBuffer(msg) ? msg.toString("utf8") :
+    typeof msg === "string" ? msg :
+    msg?.toString ? msg.toString() :
+    String(msg);
+
+  let evt;
+  try {
+    evt = JSON.parse(text);
+  } catch (e) {
+    console.log("⚠️ JSON parse failed:", e.message);
+    console.log("⚠️ raw (first 200):", text.slice(0, 200));
+    return;
+  }
 
       if (evt.event === "start") {
         console.log("▶️ start", evt.start);
