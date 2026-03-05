@@ -31,45 +31,40 @@ ws.on("message", async (msg) => {
     return;
   }
 
-      if (evt.event === "start") {
-        console.log("▶️ start", evt.start);
-        mediaCount = 0;
+  // START
+  if (evt.event === "start") {
+    console.log("▶️ start", evt.start);
+    mediaCount = 0;
 
-        } else {
-  fetch(brainUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      call: {
-        callSid: evt.start?.callSid,
-        from: evt.start?.customParameters?.From || evt.start?.from,
-        to: evt.start?.customParameters?.To || evt.start?.to,
-        lang: "fr-FR",
-      },
-      turn: { text: "TEST NODE → N8N", confidence: 1 },
-      state: { phase: "intake", collected: {} },
-    }),
-  })
-    .then((r) => r.json())
-    .then((data) => console.log("🧠 n8n reply:", data))
-    .catch((err) => console.log("❌ n8n error:", err?.message || err));
-      }
+    // Test call to n8n (comme tu l'avais prévu)
+    fetch(process.env.N8N_BRAIN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        call: { provider: "twilio", streamSid: evt.start?.streamSid },
+        turn: { text: "TEST NODE → N8N" },
+        state: {},
+      }),
+    })
+      .then((r) => r.json())
+      .then((data) => console.log("🧠 n8n reply:", data))
+      .catch((err) => console.log("❌ n8n error:", err?.message || err));
+  }
 
-      if (evt.event === "media") {
-        mediaCount++;
-        if (mediaCount % 50 === 0) {
-          console.log(`🎧 media packets: ${mediaCount}`);
-        }
-      }
-
-      if (evt.event === "stop") {
-        console.log("⏹️ stop", evt.stop);
-        console.log(`✅ total media packets: ${mediaCount}`);
-      }
-    } catch (e) {
-      console.log("⚠️ non-JSON message", msg.toString().slice(0, 120));
+  // MEDIA
+  if (evt.event === "media") {
+    mediaCount++;
+    if (mediaCount % 50 === 0) {
+      console.log(`🎧 media packets: ${mediaCount}`);
     }
-  });
+  }
+
+  // STOP
+  if (evt.event === "stop") {
+    console.log("⏹️ stop", evt.stop);
+    console.log(`✅ total media packets: ${mediaCount}`);
+  }
+});
 
   ws.on("close", () => console.log("❌ Twilio WS closed"));
 });
