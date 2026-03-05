@@ -22,6 +22,25 @@ wss.on("connection", (ws) => {
       if (evt.event === "start") {
         console.log("▶️ start", evt.start);
         mediaCount = 0;
+
+        } else {
+  fetch(brainUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      call: {
+        callSid: evt.start?.callSid,
+        from: evt.start?.customParameters?.From || evt.start?.from,
+        to: evt.start?.customParameters?.To || evt.start?.to,
+        lang: "fr-FR",
+      },
+      turn: { text: "TEST NODE → N8N", confidence: 1 },
+      state: { phase: "intake", collected: {} },
+    }),
+  })
+    .then((r) => r.json())
+    .then((data) => console.log("🧠 n8n reply:", data))
+    .catch((err) => console.log("❌ n8n error:", err?.message || err));
       }
 
       if (evt.event === "media") {
