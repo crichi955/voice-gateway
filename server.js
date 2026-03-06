@@ -1,7 +1,8 @@
 import OpenAI from "openai";
 import wavefilePkg from "wavefile";
 const { WaveFile } = wavefilePkg;
-import { mulaw } from "alawmulaw";
+import alawmulawPkg from "alawmulaw";
+const { mulaw } = alawmulawPkg;
 
 import express from "express";
 import http from "http";
