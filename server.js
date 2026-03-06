@@ -1,5 +1,6 @@
 import OpenAI from "openai";
-import { WaveFile } from "wavefile";
+import wavefilePkg from "wavefile";
+const { WaveFile } = wavefilePkg;
 import { mulaw } from "alawmulaw";
 
 import express from "express";
