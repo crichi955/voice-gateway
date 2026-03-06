@@ -50,20 +50,6 @@ ws.on("message", async (msg) => {
   if (evt.event === "start") {
     console.log("▶️ start", evt.start);
     mediaCount = 0;
-
-    // Test call to n8n (comme tu l'avais prévu)
-    fetch(process.env.N8N_BRAIN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        call: { provider: "twilio", streamSid: evt.start?.streamSid },
-        turn: { text: "TEST NODE → N8N" },
-        state: {},
-      }),
-    })
-      .then((r) => r.json())
-      .then((data) => console.log("🧠 n8n reply:", data))
-      .catch((err) => console.log("❌ n8n error:", err?.message || err));
   }
 
 // MEDIA
