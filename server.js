@@ -1,11 +1,12 @@
-const OpenAI = require("openai");
-const { WaveFile } = require("wavefile");
-const { mulaw } = require("alawmulaw");
+import OpenAI from "openai";
+import { WaveFile } from "wavefile";
+import { mulaw } from "alawmulaw";
+
+import express from "express";
+import http from "http";
+import { WebSocketServer } from "ws";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const express = require("express");
-const http = require("http");
-const { WebSocketServer } = require("ws");
 
 const app = express();
 
