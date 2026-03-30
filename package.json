@@ -9,6 +9,8 @@
     "ws": "^8.18.0"
   },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js"
   }
 }
