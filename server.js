@@ -78,9 +78,11 @@ app.post("/twilio/voice", async (req, res) => {
     }
 
     // Build WS URL based on the webhook request host.
-    // Twilio must reach this WS endpoint publicly (reverse proxy / ngrok / etc.).
+    // Twilio must reach this WS endpoint publicly (Render/ngrok/etc.).
     const host = req.get("host");
-    const proto = req.secure ? "wss" : "ws";
+    const forwardedProto = req.get("x-forwarded-proto");
+    const isSecure = (forwardedProto && forwardedProto.includes("https")) || req.secure;
+    const proto = isSecure ? "wss" : "ws";
     const wsUrl = `${proto}://${host}/twilio`;
 
     res.type("text/xml").send(buildTwimlConnect(wsUrl));
