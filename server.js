@@ -160,7 +160,7 @@ async function elevenLabsTextToMuLaw8000(text) {
     },
     body: JSON.stringify({
       text,
-      model_id: process.env.ELEVENLABS_MODEL_ID || "eleven_turbo_v2",
+      model_id: process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2",
     }),
   });
 
