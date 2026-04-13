@@ -5,6 +5,7 @@ import alawmulawPkg from "alawmulaw";
 import express from "express";
 import http from "http";
 import { WebSocketServer } from "ws";
+import { performance } from "node:perf_hooks";
 
 const { WaveFile } = wavefilePkg;
 const { mulaw } = alawmulawPkg;
@@ -135,8 +136,8 @@ async function elevenLabsTextToMuLaw8000(text) {
     throw new Error("Missing ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID.");
   }
 
-  // ulaw_8000 is the native Twilio telephony format (single channel μ-law 8kHz).
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=ulaw_8000`;
+  // Request PCM so we can control μ-law encoding ourselves.
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=pcm_8000`;
   const resp = await fetch(url, {
     method: "POST",
     headers: {
@@ -155,18 +156,42 @@ async function elevenLabsTextToMuLaw8000(text) {
   }
 
   const ab = await resp.arrayBuffer();
-  return Buffer.from(ab);
+  const pcmBuffer = Buffer.from(ab);
+  const pcm = new Int16Array(
+    pcmBuffer.buffer,
+    pcmBuffer.byteOffset,
+    Math.floor(pcmBuffer.byteLength / 2)
+  );
+  const ulaw = mulaw.encode(pcm);
+  return Buffer.from(ulaw);
 }
 
 async function playMuLawToTwilio(ws, streamSid, muLawBuffer) {
   if (!streamSid) return;
   // 20ms @ 8000 Hz => 160 bytes (μ-law is 8-bit/byte).
+  const FRAME_MS = 20;
   const CHUNK_BYTES = 160;
+  const SILENCE_BYTE = 0xff;
+  let frameIndex = 0;
+  const startedAt = performance.now();
 
   for (let i = 0; i < muLawBuffer.length; i += CHUNK_BYTES) {
     if (killNow) return;
-    const chunk = muLawBuffer.subarray(i, i + CHUNK_BYTES);
+    const rawChunk = muLawBuffer.subarray(i, i + CHUNK_BYTES);
+    // Always send full 20ms frames to avoid timing/audio artifacts on tail frames.
+    const chunk =
+      rawChunk.length === CHUNK_BYTES
+        ? rawChunk
+        : Buffer.concat([rawChunk, Buffer.alloc(CHUNK_BYTES - rawChunk.length, SILENCE_BYTE)]);
     const payload = Buffer.from(chunk).toString("base64");
+
+    // Anti-jitter scheduler: align each frame to a monotonic clock.
+    const targetAt = startedAt + frameIndex * FRAME_MS;
+    const now = performance.now();
+    if (targetAt > now) {
+      await sleep(targetAt - now);
+    }
+
     ws.send(
       JSON.stringify({
         event: "media",
@@ -174,8 +199,7 @@ async function playMuLawToTwilio(ws, streamSid, muLawBuffer) {
         media: { payload },
       })
     );
-    // Throttle so Twilio receives in real-time.
-    await sleep(20);
+    frameIndex += 1;
   }
 }
 
