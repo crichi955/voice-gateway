@@ -266,6 +266,7 @@ wss.on("connection", (ws) => {
     sttPaused: false,
     responded: false,
     n8nInFlight: false,
+    n8nMissingLogged: false,
   };
 
   async function degradedFallback(wsToUse, sessionToUse, reason) {
@@ -351,6 +352,16 @@ wss.on("connection", (ws) => {
       if (!session.streamSid) return;
       if (session.sttPaused || session.responded) return;
 
+      // If n8n is not configured yet, keep the call alive after welcome
+      // but do not trigger degraded mode or any downstream processing.
+      if (!process.env.N8N_BRAIN_URL) {
+        if (!session.n8nMissingLogged) {
+          session.n8nMissingLogged = true;
+          console.log("ℹ️ N8N_BRAIN_URL not configured: welcome-only mode, skipping STT->n8n.");
+        }
+        return;
+      }
+
       session.mediaCount++;
 
       // Twilio sends μ-law 8kHz payload (base64)
@@ -397,6 +408,17 @@ wss.on("connection", (ws) => {
         console.log("📝 transcript:", transcript);
 
         if (!transcript) {
+          session.n8nInFlight = false;
+          return;
+        }
+
+        // Whisper anti-hallucination guard:
+        // - ignore known subtitle artifacts
+        // - ignore fragments shorter than 3 words
+        const normalized = transcript.toLowerCase();
+        const wordCount = transcript.split(/\s+/).filter(Boolean).length;
+        if (normalized.includes("sous-titres") || normalized.includes("amara") || wordCount < 3) {
+          console.log("⚠️ Ignored likely hallucinated transcript:", transcript);
           session.n8nInFlight = false;
           return;
         }
