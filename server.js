@@ -40,17 +40,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function pcm16leBufferToInt16Array(pcmBuffer) {
-  // ElevenLabs pcm_8000 is signed 16-bit little-endian mono.
-  // Decode explicitly with readInt16LE to avoid platform ambiguity.
-  const sampleCount = Math.floor(pcmBuffer.length / 2);
-  const out = new Int16Array(sampleCount);
-  for (let i = 0; i < sampleCount; i += 1) {
-    out[i] = pcmBuffer.readInt16LE(i * 2);
-  }
-  return out;
-}
-
 function toWhatsAppTo(fromNumber) {
   if (!fromNumber) return null;
   const n = String(fromNumber).trim();
@@ -147,8 +136,8 @@ async function elevenLabsTextToMuLaw8000(text) {
     throw new Error("Missing ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID.");
   }
 
-  // Request PCM so we can control μ-law encoding ourselves.
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=pcm_8000`;
+  // Ask ElevenLabs for native telephony μ-law 8kHz output.
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=ulaw_8000`;
   const resp = await fetch(url, {
     method: "POST",
     headers: {
@@ -157,7 +146,7 @@ async function elevenLabsTextToMuLaw8000(text) {
     },
     body: JSON.stringify({
       text,
-      model_id: process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2",
+      model_id: process.env.ELEVENLABS_MODEL_ID || "eleven_turbo_v2",
     }),
   });
 
@@ -167,10 +156,15 @@ async function elevenLabsTextToMuLaw8000(text) {
   }
 
   const ab = await resp.arrayBuffer();
-  const pcmBuffer = Buffer.from(ab);
-  const pcm = pcm16leBufferToInt16Array(pcmBuffer);
-  const ulaw = mulaw.encode(pcm);
-  return Buffer.from(ulaw);
+  const audioBuffer = Buffer.from(ab);
+  const contentType = (resp.headers.get("content-type") || "").toLowerCase();
+  console.log(`🔊 ElevenLabs TTS content-type: ${contentType || "unknown"} | bytes: ${audioBuffer.length}`);
+  if (contentType.includes("mp3") || contentType.includes("mpeg") || contentType.includes("opus") || contentType.includes("wav")) {
+    console.log("⚠️ Unexpected TTS content-type for ulaw_8000; expected raw telephony audio.");
+  }
+
+  // ulaw_8000 response is already μ-law 8kHz.
+  return audioBuffer;
 }
 
 async function playMuLawToTwilio(ws, streamSid, muLawBuffer) {
