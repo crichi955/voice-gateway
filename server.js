@@ -40,6 +40,17 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function pcm16leBufferToInt16Array(pcmBuffer) {
+  // ElevenLabs pcm_8000 is signed 16-bit little-endian mono.
+  // Decode explicitly with readInt16LE to avoid platform ambiguity.
+  const sampleCount = Math.floor(pcmBuffer.length / 2);
+  const out = new Int16Array(sampleCount);
+  for (let i = 0; i < sampleCount; i += 1) {
+    out[i] = pcmBuffer.readInt16LE(i * 2);
+  }
+  return out;
+}
+
 function toWhatsAppTo(fromNumber) {
   if (!fromNumber) return null;
   const n = String(fromNumber).trim();
@@ -157,11 +168,7 @@ async function elevenLabsTextToMuLaw8000(text) {
 
   const ab = await resp.arrayBuffer();
   const pcmBuffer = Buffer.from(ab);
-  const pcm = new Int16Array(
-    pcmBuffer.buffer,
-    pcmBuffer.byteOffset,
-    Math.floor(pcmBuffer.byteLength / 2)
-  );
+  const pcm = pcm16leBufferToInt16Array(pcmBuffer);
   const ulaw = mulaw.encode(pcm);
   return Buffer.from(ulaw);
 }
@@ -174,15 +181,21 @@ async function playMuLawToTwilio(ws, streamSid, muLawBuffer) {
   const SILENCE_BYTE = 0xff;
   let frameIndex = 0;
   const startedAt = performance.now();
+  const frames = [];
 
   for (let i = 0; i < muLawBuffer.length; i += CHUNK_BYTES) {
-    if (killNow) return;
     const rawChunk = muLawBuffer.subarray(i, i + CHUNK_BYTES);
     // Always send full 20ms frames to avoid timing/audio artifacts on tail frames.
-    const chunk =
+    frames.push(
       rawChunk.length === CHUNK_BYTES
-        ? rawChunk
-        : Buffer.concat([rawChunk, Buffer.alloc(CHUNK_BYTES - rawChunk.length, SILENCE_BYTE)]);
+        ? Buffer.from(rawChunk)
+        : Buffer.concat([rawChunk, Buffer.alloc(CHUNK_BYTES - rawChunk.length, SILENCE_BYTE)])
+    );
+  }
+
+  // Send pre-built frames at regular pace (no conversion/chunking work in the timing loop).
+  for (const chunk of frames) {
+    if (killNow) return;
     const payload = Buffer.from(chunk).toString("base64");
 
     // Anti-jitter scheduler: align each frame to a monotonic clock.
