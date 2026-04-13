@@ -47,6 +47,20 @@ function toWhatsAppTo(fromNumber) {
   return n.startsWith("whatsapp:") ? n : `whatsapp:${n}`;
 }
 
+function getValidN8nBrainUrl() {
+  const raw = process.env.N8N_BRAIN_URL;
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 function buildTwimlConnect(wsUrl) {
   // Twilio will start streaming as soon as the WS handshake is complete.
   // We keep the Twilio transport simple; audio playback is handled by our WS.
@@ -216,7 +230,7 @@ async function playText(ws, session, text) {
 }
 
 async function callN8nForTurn({ transcript, session }) {
-  const brainUrl = process.env.N8N_BRAIN_URL;
+  const brainUrl = getValidN8nBrainUrl();
   if (!brainUrl) throw new Error("Missing N8N_BRAIN_URL.");
 
   const controller = new AbortController();
@@ -354,10 +368,10 @@ wss.on("connection", (ws) => {
 
       // If n8n is not configured yet, keep the call alive after welcome
       // but do not trigger degraded mode or any downstream processing.
-      if (!process.env.N8N_BRAIN_URL) {
+      if (!getValidN8nBrainUrl()) {
         if (!session.n8nMissingLogged) {
           session.n8nMissingLogged = true;
-          console.log("ℹ️ N8N_BRAIN_URL not configured: welcome-only mode, skipping STT->n8n.");
+          console.log("ℹ️ N8N_BRAIN_URL missing/invalid: welcome-only mode, skipping STT->n8n.");
         }
         return;
       }
