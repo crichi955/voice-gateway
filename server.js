@@ -6,6 +6,7 @@ import express from "express";
 import http from "http";
 import { WebSocketServer } from "ws";
 import { performance } from "node:perf_hooks";
+import nodemailer from "nodemailer";
 
 const { WaveFile } = wavefilePkg;
 const { mulaw } = alawmulawPkg;
@@ -18,9 +19,10 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (req, res) => res.status(200).send("ok"));
 
-// Keep a small in-memory mapping from CallSid -> From (phone number)
-// so that we can send WhatsApp back when the WS 'start' arrives.
-const callSidToFrom = new Map();
+// Keep a small in-memory mapping from CallSid -> caller metadata
+// so that we can reuse it when the WS 'start' arrives.
+const callSidToCaller = new Map();
+let smtpTransport = null;
 
 function parseBool(v) {
   return String(v ?? "").toLowerCase() === "true";
@@ -45,6 +47,38 @@ function toWhatsAppTo(fromNumber) {
   const n = String(fromNumber).trim();
   if (!n) return null;
   return n.startsWith("whatsapp:") ? n : `whatsapp:${n}`;
+}
+
+function getSmtpTransport() {
+  if (smtpTransport) return smtpTransport;
+
+  const host = process.env.SMTP_HOST;
+  const port = Number(process.env.SMTP_PORT || 587);
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  if (!host || !port || !user || !pass) return null;
+
+  smtpTransport = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+  });
+  return smtpTransport;
+}
+
+function buildDoctorNotificationText({ patientName, patientNumber, transcript }) {
+  const safeName = patientName || "Inconnu";
+  const safeNumber = patientNumber || "Numero inconnu";
+  const safeTranscript = transcript || "(transcription vide)";
+  return [
+    "Nouveau message vocal patient",
+    `Nom: ${safeName}`,
+    `Numero: ${safeNumber}`,
+    "",
+    "Transcript:",
+    safeTranscript,
+  ].join("\n");
 }
 
 function getValidN8nBrainUrl() {
@@ -85,7 +119,17 @@ app.post("/twilio/voice", async (req, res) => {
   try {
     const callSid = req.body?.CallSid;
     const from = req.body?.From;
-    if (callSid) callSidToFrom.set(callSid, from);
+    const patientName =
+      req.body?.CallerName ||
+      req.body?.FromName ||
+      req.body?.caller_name ||
+      null;
+    if (callSid) {
+      callSidToCaller.set(callSid, {
+        from: from || null,
+        name: patientName || null,
+      });
+    }
 
     if (killNow) {
       res.type("text/xml").send(twimlSayAndHangup("Service temporairement indisponible."));
@@ -140,6 +184,57 @@ async function sendWhatsApp({ to, body }) {
   if (!resp.ok) {
     const txt = await resp.text().catch(() => "");
     throw new Error(`Twilio WhatsApp error: ${resp.status} ${resp.statusText} ${txt}`);
+  }
+}
+
+async function sendDoctorWhatsAppNotification({ patientName, patientNumber, transcript }) {
+  const doctorWhatsApp = process.env.DOCTOR_WHATSAPP;
+  if (!doctorWhatsApp) {
+    console.log("⚠️ DOCTOR_WHATSAPP missing; doctor WhatsApp notification skipped.");
+    return;
+  }
+  const to = doctorWhatsApp.startsWith("whatsapp:")
+    ? doctorWhatsApp
+    : `whatsapp:${doctorWhatsApp}`;
+  const body = buildDoctorNotificationText({ patientName, patientNumber, transcript });
+  await sendWhatsApp({ to, body });
+}
+
+async function sendDoctorEmailNotification({ patientNumber, transcript }) {
+  const doctorEmail = process.env.DOCTOR_EMAIL;
+  if (!doctorEmail) {
+    console.log("⚠️ DOCTOR_EMAIL missing; doctor email notification skipped.");
+    return;
+  }
+
+  const transporter = getSmtpTransport();
+  if (!transporter) {
+    console.log("⚠️ SMTP config missing/invalid; doctor email notification skipped.");
+    return;
+  }
+
+  const safeNumber = patientNumber || "inconnu";
+  const subject = `[PATIENT: ${safeNumber}] Message vocal recu`;
+  const text = transcript || "(transcription vide)";
+  await transporter.sendMail({
+    from: process.env.SMTP_USER,
+    to: doctorEmail,
+    subject,
+    text,
+  });
+}
+
+async function notifyDoctorDoubleChannel({ patientName, patientNumber, transcript }) {
+  try {
+    await sendDoctorWhatsAppNotification({ patientName, patientNumber, transcript });
+  } catch (err) {
+    console.log("❌ Doctor WhatsApp notification error:", err?.message || err);
+  }
+
+  try {
+    await sendDoctorEmailNotification({ patientNumber, transcript });
+  } catch (err) {
+    console.log("❌ Doctor email notification error:", err?.message || err);
   }
 }
 
@@ -273,6 +368,7 @@ wss.on("connection", (ws) => {
     callSid: null,
     streamSid: null,
     fromNumber: null,
+    patientName: null,
     mediaCount: 0,
     audioChunks: [],
     audioBytes: 0,
@@ -341,7 +437,9 @@ wss.on("connection", (ws) => {
     if (evt.event === "start") {
       session.callSid = evt.start?.callSid || evt.start?.call_sid || null;
       session.streamSid = evt.streamSid || evt.start?.streamSid || null;
-      session.fromNumber = session.callSid ? callSidToFrom.get(session.callSid) : null;
+      const caller = session.callSid ? callSidToCaller.get(session.callSid) : null;
+      session.fromNumber = caller?.from || null;
+      session.patientName = caller?.name || null;
 
       console.log("▶️ start", { callSid: session.callSid, streamSid: session.streamSid });
 
@@ -463,6 +561,14 @@ wss.on("connection", (ws) => {
 
         if (action === "fallback") {
           await playText(ws, session, textToSpeak);
+
+          // Notify doctor with patient metadata + transcript on FAQ fallback.
+          await notifyDoctorDoubleChannel({
+            patientName: session.patientName,
+            patientNumber: session.fromNumber,
+            transcript,
+          });
+
           const to = toWhatsAppTo(session.fromNumber);
           const url = whatsappUrl || process.env.WHATSAPP_FALLBACK_URL;
           if (to && url) {

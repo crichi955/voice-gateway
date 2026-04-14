@@ -4,6 +4,7 @@
   "dependencies": {
     "alawmulaw": "^6.0.0",
     "express": "^4.19.2",
+    "nodemailer": "^8.0.5",
     "openai": "^6.27.0",
     "wavefile": "^11.0.0",
     "ws": "^8.18.0"
