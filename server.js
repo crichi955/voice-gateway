@@ -517,7 +517,10 @@ wss.on("connection", (ws) => {
         });
 
         const transcript = (transcriptResp.text || "").trim();
-        console.log("📝 transcript:", transcript);
+        // RGPD: les transcriptions vocales ne sont jamais persistées en base de données.
+        // Les seules traces éventuelles sont dans les logs applicatifs (hébergement Render : rétention des logs max. 7 jours).
+        const wordCount = transcript.split(/\s+/).filter(Boolean).length;
+        console.log(`📝 transcript reçu (${wordCount} mots)`);
 
         if (!transcript) {
           session.n8nInFlight = false;
@@ -528,9 +531,8 @@ wss.on("connection", (ws) => {
         // - ignore known subtitle artifacts
         // - ignore fragments shorter than 3 words
         const normalized = transcript.toLowerCase();
-        const wordCount = transcript.split(/\s+/).filter(Boolean).length;
         if (normalized.includes("sous-titres") || normalized.includes("amara") || wordCount < 3) {
-          console.log("⚠️ Ignored likely hallucinated transcript:", transcript);
+          console.log(`⚠️ Ignored likely hallucinated transcript (${wordCount} mots, contenu non journalisé)`);
           session.n8nInFlight = false;
           return;
         }
@@ -538,10 +540,10 @@ wss.on("connection", (ws) => {
         session.sttPaused = true;
 
         const brainJson = await callN8nForTurn({ transcript, session });
-        console.log("🧠 n8n reply:", brainJson);
-
         const action = brainJson?.action;
         const textToSpeak = brainJson?.text;
+        const replyTextLen = typeof textToSpeak === "string" ? textToSpeak.length : 0;
+        console.log(`🧠 n8n reply: action=${action ?? "n/a"} length=${replyTextLen}`);
         const whatsappUrl = brainJson?.whatsappUrl;
 
         if (killNow) return;
