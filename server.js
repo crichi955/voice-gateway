@@ -29,6 +29,8 @@ function parseBool(v) {
 }
 
 const KILL_SWITCH_ENABLED = parseBool(process.env.KILL_SWITCH);
+/** Si `DEBUG_TRANSCRIPT=true`, journalise le texte intégral envoyé à n8n (débogage court terme uniquement). */
+const DEBUG_TRANSCRIPT = parseBool(process.env.DEBUG_TRANSCRIPT);
 let killNow = false;
 if (KILL_SWITCH_ENABLED) {
   console.log("🛑 KILL_SWITCH enabled: will disable everything in 10s...");
@@ -546,6 +548,9 @@ wss.on("connection", (ws) => {
 
         session.sttPaused = true;
 
+        if (DEBUG_TRANSCRIPT) {
+          console.log("🐛 DEBUG_TRANSCRIPT: texte envoyé à n8n:", transcript);
+        }
         const brainJson = await callN8nForTurn({ transcript, session });
         const action = brainJson?.action;
         const textToSpeak = brainJson?.text;
