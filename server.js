@@ -326,6 +326,22 @@ async function playText(ws, session, text) {
   await playMuLawToTwilio(ws, session.streamSid, muLaw);
 }
 
+/**
+ * Coupe le STT pendant tout le TTS ElevenLabs puis 1 s après la fin (évite que Whisper
+ * retranscrive la voix synthétique). Remet sttPaused à false ensuite.
+ */
+function createPlayTextWithSttGuard(sleepFn, postPlayMs) {
+  return async function playTextWithSttGuard(ws, session, text) {
+    session.sttPaused = true;
+    try {
+      await playText(ws, session, text);
+    } finally {
+      await sleepFn(postPlayMs);
+      session.sttPaused = false;
+    }
+  };
+}
+
 async function callN8nForTurn({ transcript, session }) {
   const brainUrl = getValidN8nBrainUrl();
   if (!brainUrl) throw new Error("Missing N8N_BRAIN_URL.");
@@ -366,6 +382,8 @@ wss.on("connection", (ws) => {
   const STREAM_SAMPLE_RATE = 8000; // Twilio μ-law 8kHz
   const MIN_BYTES_TO_TRANSCRIBE = Number(process.env.STT_MIN_BYTES || 4000);
   const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 3000);
+  const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 1000);
+  const playTextWithSttGuard = createPlayTextWithSttGuard(sleep, TTS_POST_PLAY_MS);
 
   const session = {
     callSid: null,
@@ -387,7 +405,6 @@ wss.on("connection", (ws) => {
   async function degradedFallback(wsToUse, sessionToUse, reason) {
     if (sessionToUse.responded) return;
     sessionToUse.responded = true;
-    sessionToUse.sttPaused = true;
 
     console.log("⚠️ Degraded mode:", reason);
 
@@ -396,7 +413,7 @@ wss.on("connection", (ws) => {
       "Désolé, un problème technique est survenu. Pour continuer, veuillez consulter le lien WhatsApp que je vous envoie maintenant.";
 
     try {
-      await playText(wsToUse, sessionToUse, shortVoice);
+      await playTextWithSttGuard(wsToUse, sessionToUse, shortVoice);
     } catch (err) {
       console.log("❌ TTS degraded error:", err?.message || err);
     }
@@ -448,13 +465,13 @@ wss.on("connection", (ws) => {
 
       console.log("▶️ start", { callSid: session.callSid, streamSid: session.streamSid });
 
-      // Welcome message at start (ElevenLabs)
+      // Welcome message at start (ElevenLabs) — sttPaused via playTextWithSttGuard le temps du TTS + post-roll
       try {
         if (!session.responded) {
           const welcomeText =
             process.env.WELCOME_TEXT ||
             "Bonjour et bienvenue au cabinet du Dr Crichi à Saint-Cloud. Dites-moi votre question, et je vous aide du mieux possible.";
-          await playText(ws, session, welcomeText);
+          await playTextWithSttGuard(ws, session, welcomeText);
         }
       } catch (err) {
         console.log("❌ Welcome TTS error:", err?.message || err);
@@ -569,12 +586,12 @@ wss.on("connection", (ws) => {
         }
 
         if (action === "answer") {
-          await playText(ws, session, textToSpeak);
+          await playTextWithSttGuard(ws, session, textToSpeak);
           return;
         }
 
         if (action === "fallback") {
-          await playText(ws, session, textToSpeak);
+          await playTextWithSttGuard(ws, session, textToSpeak);
 
           // Notify doctor with patient metadata + transcript on FAQ fallback.
           await notifyDoctorDoubleChannel({
@@ -594,7 +611,7 @@ wss.on("connection", (ws) => {
         }
 
         if (action === "urgence") {
-          await playText(ws, session, textToSpeak);
+          await playTextWithSttGuard(ws, session, textToSpeak);
           // n8n gère la détection; ici on joue le message.
           return;
         }
