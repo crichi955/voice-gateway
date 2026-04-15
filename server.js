@@ -360,9 +360,10 @@ async function callN8nForTurn({ transcript, session }) {
 wss.on("connection", (ws) => {
   console.log("✅ Twilio WS connected");
 
-  const SEGMENT_MS = Number(process.env.STT_SEGMENT_MS || 4000);
+  const SEGMENT_MS = Number(process.env.STT_SEGMENT_MS || 6000);
   const STREAM_SAMPLE_RATE = 8000; // Twilio μ-law 8kHz
-  const MIN_BYTES_TO_TRANSCRIBE = Number(process.env.STT_MIN_BYTES || 800);
+  const MIN_BYTES_TO_TRANSCRIBE = Number(process.env.STT_MIN_BYTES || 4000);
+  const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 3000);
 
   const session = {
     callSid: null,
@@ -373,6 +374,8 @@ wss.on("connection", (ws) => {
     audioChunks: [],
     audioBytes: 0,
     lastFlushTs: Date.now(),
+    /** `null` tant que le message d'accueil n'est pas terminé ; ensuite timestamp au-delà duquel l'écoute STT est autorisée. */
+    listenReadyAt: null,
     sttPaused: false,
     responded: false,
     n8nInFlight: false,
@@ -454,6 +457,9 @@ wss.on("connection", (ws) => {
       } catch (err) {
         console.log("❌ Welcome TTS error:", err?.message || err);
         // If welcome fails, we still try to do the rest.
+      } finally {
+        session.listenReadyAt = Date.now() + POST_WELCOME_LISTEN_DELAY_MS;
+        session.lastFlushTs = Date.now();
       }
 
       return;
@@ -463,6 +469,7 @@ wss.on("connection", (ws) => {
     if (evt.event === "media") {
       if (!session.streamSid) return;
       if (session.sttPaused || session.responded) return;
+      if (session.listenReadyAt == null || Date.now() < session.listenReadyAt) return;
 
       // If n8n is not configured yet, keep the call alive after welcome
       // but do not trigger degraded mode or any downstream processing.
