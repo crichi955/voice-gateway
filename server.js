@@ -32,19 +32,21 @@ const KILL_SWITCH_ENABLED = parseBool(process.env.KILL_SWITCH);
 /** Si `DEBUG_TRANSCRIPT=true`, journalise le texte intégral envoyé à n8n (débogage court terme uniquement). */
 const DEBUG_TRANSCRIPT = parseBool(process.env.DEBUG_TRANSCRIPT);
 
-/** Fragments souvent hallucinés par Whisper (FR) sur du silence / bruit — comparaison en minuscules. */
-const WHISPER_FR_HALLUCINATION_HINTS = [
-  "sous-titres",
-  "sous-titrage",
-  "amara",
-  "merci d'avoir regardé",
-  "merci d'avoir regardé cette vidéo",
-  "abonnez-vous",
-  "commentaire",
-  "n'oubliez pas",
-  "merci et à bientôt",
-  "transcription",
-];
+/** Seuil Whisper `no_speech_prob` (verbose_json, segments) — au-dessus = silence/bruit probable. */
+const STT_NO_SPEECH_THRESHOLD = Number(process.env.STT_NO_SPEECH_THRESHOLD ?? 0.5);
+
+/**
+ * Agrège no_speech_prob depuis la réponse verbose Whisper (segments ; repli si champ racine).
+ */
+function aggregateNoSpeechProb(verbose) {
+  if (!verbose || typeof verbose !== "object") return null;
+  if (typeof verbose.no_speech_prob === "number") return verbose.no_speech_prob;
+  const segs = verbose.segments;
+  if (!Array.isArray(segs) || segs.length === 0) return null;
+  const probs = segs.map((s) => s?.no_speech_prob).filter((p) => typeof p === "number");
+  if (probs.length === 0) return null;
+  return probs.reduce((a, b) => a + b, 0) / probs.length;
+}
 
 let killNow = false;
 if (KILL_SWITCH_ENABLED) {
@@ -555,9 +557,11 @@ wss.on("connection", (ws) => {
           file: new File([wavBuffer], "audio.wav", { type: "audio/wav" }),
           model,
           language,
+          response_format: "verbose_json",
         });
 
         const transcript = (transcriptResp.text || "").trim();
+        const noSpeechProb = aggregateNoSpeechProb(transcriptResp);
         // RGPD: les transcriptions vocales ne sont jamais persistées en base de données.
         // Les seules traces éventuelles sont dans les logs applicatifs (hébergement Render : rétention des logs max. 7 jours).
         const wordCount = transcript.split(/\s+/).filter(Boolean).length;
@@ -568,15 +572,10 @@ wss.on("connection", (ws) => {
           return;
         }
 
-        // Whisper anti-hallucination guard:
-        // - ignore known subtitle / YouTube-style artifacts (liste FR)
-        // - ignore fragments shorter than 3 words
-        const normalized = transcript.toLowerCase();
-        const matchesKnownHallucination = WHISPER_FR_HALLUCINATION_HINTS.some((hint) =>
-          normalized.includes(hint)
-        );
-        if (matchesKnownHallucination || wordCount < 3) {
-          console.log(`⚠️ Ignored likely hallucinated transcript (${wordCount} mots, contenu non journalisé)`);
+        if (noSpeechProb !== null && noSpeechProb > STT_NO_SPEECH_THRESHOLD) {
+          console.log(
+            `⚠️ STT ignoré (no_speech_prob=${noSpeechProb.toFixed(3)} > ${STT_NO_SPEECH_THRESHOLD})`
+          );
           session.n8nInFlight = false;
           return;
         }
@@ -584,7 +583,10 @@ wss.on("connection", (ws) => {
         session.sttPaused = true;
 
         if (DEBUG_TRANSCRIPT) {
-          console.log("🐛 DEBUG_TRANSCRIPT: texte envoyé à n8n:", transcript);
+          console.log(
+            `🐛 DEBUG_TRANSCRIPT: ${wordCount} mots | texte capté:`,
+            transcript
+          );
         }
         const brainJson = await callN8nForTurn({ transcript, session });
         const action = brainJson?.action;
