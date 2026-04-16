@@ -83,10 +83,10 @@ app.get("/debug-wav", async (req, res) => {
 });
 
 /** Gain linéaire appliqué au PCM 16 bits avant Whisper (Twilio = signal souvent faible). */
-const AUDIO_GAIN = Number(process.env.AUDIO_GAIN ?? 4.0);
+const AUDIO_GAIN = Number(process.env.AUDIO_GAIN ?? 8.0);
 
 /** Seuil Whisper `no_speech_prob` (verbose_json, segments) — au-dessus = silence/bruit probable. */
-const STT_NO_SPEECH_THRESHOLD = Number(process.env.STT_NO_SPEECH_THRESHOLD ?? 0.85);
+const STT_NO_SPEECH_THRESHOLD = Number(process.env.STT_NO_SPEECH_THRESHOLD ?? 0.95);
 
 /**
  * Agrège no_speech_prob depuis la réponse verbose Whisper (segments ; repli si champ racine).
