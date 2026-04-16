@@ -5,6 +5,7 @@ import alawmulawPkg from "alawmulaw";
 import express from "express";
 import multer from "multer";
 import http from "http";
+import { writeFile } from "node:fs/promises";
 import { WebSocketServer } from "ws";
 import { performance } from "node:perf_hooks";
 import nodemailer from "nodemailer";
@@ -62,6 +63,9 @@ function parseBool(v) {
 const KILL_SWITCH_ENABLED = parseBool(process.env.KILL_SWITCH);
 /** Si `DEBUG_TRANSCRIPT=true`, journalise le texte intégral envoyé à n8n (débogage court terme uniquement). */
 const DEBUG_TRANSCRIPT = parseBool(process.env.DEBUG_TRANSCRIPT);
+/** Si `DEBUG_SAVE_WAV=true`, enregistre le 1er segment WAV Twilio→Whisper sur disque (debug stream). */
+const DEBUG_SAVE_WAV = parseBool(process.env.DEBUG_SAVE_WAV);
+const DEBUG_SAVE_WAV_PATH = String(process.env.DEBUG_SAVE_WAV_PATH || "/tmp/debug_segment.wav");
 
 /** Seuil Whisper `no_speech_prob` (verbose_json, segments) — au-dessus = silence/bruit probable. */
 const STT_NO_SPEECH_THRESHOLD = Number(process.env.STT_NO_SPEECH_THRESHOLD ?? 0.5);
@@ -448,6 +452,7 @@ wss.on("connection", (ws) => {
     responded: false,
     n8nInFlight: false,
     n8nMissingLogged: false,
+    debugSegmentWavSaved: false,
   };
 
   async function degradedFallback(wsToUse, sessionToUse, reason) {
@@ -583,6 +588,16 @@ wss.on("connection", (ws) => {
         console.log(
           `🔊 STT WAV vers Whisper: ${wavBuffer.length} octets (μ-law entrée: ${ulawBuffer.length} octets, ${STREAM_SAMPLE_RATE} Hz)`
         );
+
+        if (DEBUG_SAVE_WAV && !session.debugSegmentWavSaved) {
+          session.debugSegmentWavSaved = true;
+          try {
+            await writeFile(DEBUG_SAVE_WAV_PATH, wavBuffer);
+            console.log(`🐛 DEBUG_SAVE_WAV: ${wavBuffer.length} octets → ${DEBUG_SAVE_WAV_PATH}`);
+          } catch (err) {
+            console.log("⚠️ DEBUG_SAVE_WAV write error:", err?.message || err);
+          }
+        }
 
         const model = process.env.STT_MODEL || "whisper-1";
         const language = process.env.STT_LANGUAGE || "fr";
