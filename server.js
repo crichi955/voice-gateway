@@ -88,6 +88,21 @@ const AUDIO_GAIN = Number(process.env.AUDIO_GAIN ?? 8.0);
 /** Seuil Whisper `no_speech_prob` (verbose_json, segments) — au-dessus = silence/bruit probable. */
 const STT_NO_SPEECH_THRESHOLD = Number(process.env.STT_NO_SPEECH_THRESHOLD ?? 0.95);
 
+/** Fragments souvent hallucinés par Whisper (FR) — comparaison en minuscules. */
+const WHISPER_FR_HALLUCINATION_HINTS = [
+  "sous-titres",
+  "sous-titrage",
+  "amara",
+  "merci d'avoir regardé",
+  "merci d'avoir regardé cette vidéo",
+  "abonnez-vous",
+  "réseaux sociaux",
+  "commentaire",
+  "n'oubliez pas",
+  "merci et à bientôt",
+  "transcription",
+];
+
 /**
  * Agrège no_speech_prob depuis la réponse verbose Whisper (segments ; repli si champ racine).
  */
@@ -484,7 +499,7 @@ wss.on("connection", (ws) => {
     n8nInFlight: false,
     n8nMissingLogged: false,
     debugSegmentWavSaved: false,
-    /** Nombre de réponses n8n `fallback` déjà reçues (le 1er est ignoré pour limiter les hallucinations STT). */
+    /** Nombre de réponses n8n `fallback` déjà reçues (les 2 premières sont ignorées). */
     transcriptAttempts: 0,
   };
 
@@ -663,6 +678,16 @@ wss.on("connection", (ws) => {
           return;
         }
 
+        const normalized = transcript.toLowerCase();
+        const matchesKnownHallucination = WHISPER_FR_HALLUCINATION_HINTS.some((hint) =>
+          normalized.includes(hint)
+        );
+        if (matchesKnownHallucination) {
+          console.log("⚠️ STT ignoré (fragment hallucination FR connu, contenu non journalisé)");
+          session.n8nInFlight = false;
+          return;
+        }
+
         session.sttPaused = true;
 
         if (DEBUG_TRANSCRIPT) {
@@ -695,9 +720,9 @@ wss.on("connection", (ws) => {
 
         if (action === "fallback") {
           session.transcriptAttempts += 1;
-          if (session.transcriptAttempts < 2) {
+          if (session.transcriptAttempts < 3) {
             console.log(
-              `ℹ️ Fallback n8n ignoré (tentative ${session.transcriptAttempts}/2, STT possiblement bruit/hallucination) — poursuite écoute`
+              `ℹ️ Fallback n8n ignoré (tentative ${session.transcriptAttempts}/3, STT possiblement bruit/hallucination) — poursuite écoute`
             );
             session.sttPaused = false;
             session.audioChunks = [];
