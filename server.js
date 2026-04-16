@@ -5,7 +5,7 @@ import alawmulawPkg from "alawmulaw";
 import express from "express";
 import multer from "multer";
 import http from "http";
-import { writeFile } from "node:fs/promises";
+import { writeFile, readFile } from "node:fs/promises";
 import { WebSocketServer } from "ws";
 import { performance } from "node:perf_hooks";
 import nodemailer from "nodemailer";
@@ -66,6 +66,21 @@ const DEBUG_TRANSCRIPT = parseBool(process.env.DEBUG_TRANSCRIPT);
 /** Si `DEBUG_SAVE_WAV=true`, enregistre le 1er segment WAV Twilio→Whisper sur disque (debug stream). */
 const DEBUG_SAVE_WAV = parseBool(process.env.DEBUG_SAVE_WAV);
 const DEBUG_SAVE_WAV_PATH = String(process.env.DEBUG_SAVE_WAV_PATH || "/tmp/debug_segment.wav");
+
+app.get("/debug-wav", async (req, res) => {
+  try {
+    const buf = await readFile(DEBUG_SAVE_WAV_PATH);
+    res.setHeader("Content-Type", "audio/wav");
+    res.setHeader("Content-Disposition", 'attachment; filename="debug_segment.wav"');
+    return res.send(buf);
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      return res.status(404).type("text/plain").send("Fichier absent — activez DEBUG_SAVE_WAV puis passez un appel.");
+    }
+    console.log("❌ /debug-wav error:", err?.message || err);
+    return res.status(500).type("text/plain").send("Erreur serveur.");
+  }
+});
 
 /** Seuil Whisper `no_speech_prob` (verbose_json, segments) — au-dessus = silence/bruit probable. */
 const STT_NO_SPEECH_THRESHOLD = Number(process.env.STT_NO_SPEECH_THRESHOLD ?? 0.5);
