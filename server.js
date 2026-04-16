@@ -484,6 +484,8 @@ wss.on("connection", (ws) => {
     n8nInFlight: false,
     n8nMissingLogged: false,
     debugSegmentWavSaved: false,
+    /** Nombre de réponses n8n `fallback` déjà reçues (le 1er est ignoré pour limiter les hallucinations STT). */
+    transcriptAttempts: 0,
   };
 
   async function degradedFallback(wsToUse, sessionToUse, reason) {
@@ -678,7 +680,6 @@ wss.on("connection", (ws) => {
 
         if (killNow) return;
 
-        session.responded = true;
         session.n8nInFlight = false;
 
         if (!action || !textToSpeak) {
@@ -687,11 +688,25 @@ wss.on("connection", (ws) => {
         }
 
         if (action === "answer") {
+          session.responded = true;
           await playTextWithSttGuard(ws, session, textToSpeak);
           return;
         }
 
         if (action === "fallback") {
+          session.transcriptAttempts += 1;
+          if (session.transcriptAttempts < 2) {
+            console.log(
+              `ℹ️ Fallback n8n ignoré (tentative ${session.transcriptAttempts}/2, STT possiblement bruit/hallucination) — poursuite écoute`
+            );
+            session.sttPaused = false;
+            session.audioChunks = [];
+            session.audioBytes = 0;
+            session.lastFlushTs = Date.now();
+            return;
+          }
+
+          session.responded = true;
           await playTextWithSttGuard(ws, session, textToSpeak);
 
           // Notify doctor with patient metadata + transcript on FAQ fallback.
@@ -712,6 +727,7 @@ wss.on("connection", (ws) => {
         }
 
         if (action === "urgence") {
+          session.responded = true;
           await playTextWithSttGuard(ws, session, textToSpeak);
           // n8n gère la détection; ici on joue le message.
           return;
