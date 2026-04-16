@@ -3,6 +3,7 @@ import wavefilePkg from "wavefile";
 import alawmulawPkg from "alawmulaw";
 
 import express from "express";
+import multer from "multer";
 import http from "http";
 import { WebSocketServer } from "ws";
 import { performance } from "node:perf_hooks";
@@ -17,7 +18,37 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "1mb" }));
 
+const testSttUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+});
+
 app.get("/health", (req, res) => res.status(200).send("ok"));
+
+app.post("/test-stt", testSttUpload.single("file"), async (req, res) => {
+  try {
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ error: "Multipart field 'file' with audio data is required." });
+    }
+    const model = process.env.STT_MODEL || "whisper-1";
+    const language = process.env.STT_LANGUAGE || "fr";
+    const file = new File(
+      [req.file.buffer],
+      req.file.originalname || "audio",
+      { type: req.file.mimetype || "application/octet-stream" }
+    );
+    const transcriptResp = await openai.audio.transcriptions.create({
+      file,
+      model,
+      language,
+    });
+    const transcript = (transcriptResp.text || "").trim();
+    return res.json({ transcript });
+  } catch (err) {
+    console.log("❌ /test-stt error:", err?.message || err);
+    return res.status(500).json({ error: err?.message || String(err) });
+  }
+});
 
 // Keep a small in-memory mapping from CallSid -> caller metadata
 // so that we can reuse it when the WS 'start' arrives.
