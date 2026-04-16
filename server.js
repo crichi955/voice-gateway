@@ -345,7 +345,7 @@ async function playText(ws, session, text) {
 
 /**
  * Coupe le STT pendant tout le TTS ElevenLabs puis un délai après la fin (`TTS_POST_PLAY_MS`,
- * défaut 2500 ms — évite que Whisper retranscrive la voix synthétique). Remet sttPaused à false ensuite.
+ * défaut 800 ms — évite que Whisper retranscrive la voix synthétique). Remet sttPaused à false ensuite.
  */
 function createPlayTextWithSttGuard(sleepFn, postPlayMs) {
   return async function playTextWithSttGuard(ws, session, text) {
@@ -399,7 +399,7 @@ wss.on("connection", (ws) => {
   const STREAM_SAMPLE_RATE = 8000; // Twilio μ-law 8kHz
   const MIN_BYTES_TO_TRANSCRIBE = Number(process.env.STT_MIN_BYTES || 4000);
   const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 3000);
-  const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 2500);
+  const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 800);
   const playTextWithSttGuard = createPlayTextWithSttGuard(sleep, TTS_POST_PLAY_MS);
 
   const session = {
@@ -487,7 +487,7 @@ wss.on("connection", (ws) => {
         if (!session.responded) {
           const welcomeText =
             process.env.WELCOME_TEXT ||
-            "Bonjour et bienvenue au cabinet du Dr Crichi à Saint-Cloud. Dites-moi votre question, et je vous aide du mieux possible.";
+            "Cabinet du Dr Crichi, je vous écoute.";
           await playTextWithSttGuard(ws, session, welcomeText);
         }
       } catch (err) {
