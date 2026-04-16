@@ -549,6 +549,9 @@ wss.on("connection", (ws) => {
         const wav = new WaveFile();
         wav.fromScratch(1, STREAM_SAMPLE_RATE, "16", pcm);
         const wavBuffer = Buffer.from(wav.toBuffer());
+        console.log(
+          `🔊 STT WAV vers Whisper: ${wavBuffer.length} octets (μ-law entrée: ${ulawBuffer.length} octets, ${STREAM_SAMPLE_RATE} Hz)`
+        );
 
         const model = process.env.STT_MODEL || "whisper-1";
         const language = process.env.STT_LANGUAGE || "fr";
