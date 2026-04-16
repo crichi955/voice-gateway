@@ -82,8 +82,11 @@ app.get("/debug-wav", async (req, res) => {
   }
 });
 
+/** Gain linéaire appliqué au PCM 16 bits avant Whisper (Twilio = signal souvent faible). */
+const AUDIO_GAIN = Number(process.env.AUDIO_GAIN ?? 4.0);
+
 /** Seuil Whisper `no_speech_prob` (verbose_json, segments) — au-dessus = silence/bruit probable. */
-const STT_NO_SPEECH_THRESHOLD = Number(process.env.STT_NO_SPEECH_THRESHOLD ?? 0.5);
+const STT_NO_SPEECH_THRESHOLD = Number(process.env.STT_NO_SPEECH_THRESHOLD ?? 0.85);
 
 /**
  * Agrège no_speech_prob depuis la réponse verbose Whisper (segments ; repli si champ racine).
@@ -96,6 +99,19 @@ function aggregateNoSpeechProb(verbose) {
   const probs = segs.map((s) => s?.no_speech_prob).filter((p) => typeof p === "number");
   if (probs.length === 0) return null;
   return probs.reduce((a, b) => a + b, 0) / probs.length;
+}
+
+/** Amplifie des échantillons int16 (μ-law décodé) avec clipping [-32768, 32767]. */
+function applyPcmGainS16(samples, gain) {
+  if (!samples?.length || !Number.isFinite(gain) || gain <= 0 || gain === 1) {
+    return samples;
+  }
+  const out = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const v = Math.round(samples[i] * gain);
+    out[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+  }
+  return out;
 }
 
 let killNow = false;
@@ -593,8 +609,9 @@ wss.on("connection", (ws) => {
       session.n8nInFlight = true;
 
       try {
-        // μ-law -> PCM16 (Int16Array)
-        const pcm = mulaw.decode(ulawBuffer);
+        // μ-law -> PCM16 (Int16Array), puis amplification avant Whisper
+        const pcmRaw = mulaw.decode(ulawBuffer);
+        const pcm = applyPcmGainS16(pcmRaw, AUDIO_GAIN);
 
         // PCM16 -> WAV
         const wav = new WaveFile();
