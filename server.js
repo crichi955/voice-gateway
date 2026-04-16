@@ -463,8 +463,8 @@ wss.on("connection", (ws) => {
 
   const SEGMENT_MS = Number(process.env.STT_SEGMENT_MS || 6000);
   const STREAM_SAMPLE_RATE = 8000; // Twilio μ-law 8kHz
-  const MIN_BYTES_TO_TRANSCRIBE = Number(process.env.STT_MIN_BYTES || 4000);
-  const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 3000);
+  const MIN_BYTES_TO_TRANSCRIBE = Number(process.env.STT_MIN_BYTES || 8000);
+  const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 4000);
   const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 800);
   const playTextWithSttGuard = createPlayTextWithSttGuard(sleep, TTS_POST_PLAY_MS);
 
