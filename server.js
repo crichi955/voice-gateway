@@ -501,6 +501,8 @@ wss.on("connection", (ws) => {
     debugSegmentWavSaved: false,
     /** Nombre de réponses n8n `fallback` déjà reçues (les 2 premières sont ignorées). */
     transcriptAttempts: 0,
+    /** Segments Whisper filtrés hallucination FR d'affilée (réinitialisé après passage au STT réel). */
+    consecutiveHallucinationStrikes: 0,
   };
 
   async function degradedFallback(wsToUse, sessionToUse, reason) {
@@ -683,10 +685,24 @@ wss.on("connection", (ws) => {
           normalized.includes(hint)
         );
         if (matchesKnownHallucination) {
+          session.consecutiveHallucinationStrikes += 1;
           console.log("⚠️ STT ignoré (fragment hallucination FR connu, contenu non journalisé)");
           session.n8nInFlight = false;
+          if (session.consecutiveHallucinationStrikes >= 3) {
+            console.log(
+              "ℹ️ 3 segments hallucination consécutifs — réinitialisation écoute (sttPaused, buffers, transcriptAttempts)"
+            );
+            session.consecutiveHallucinationStrikes = 0;
+            session.transcriptAttempts = 0;
+            session.sttPaused = false;
+            session.audioChunks = [];
+            session.audioBytes = 0;
+            session.lastFlushTs = Date.now();
+          }
           return;
         }
+
+        session.consecutiveHallucinationStrikes = 0;
 
         session.sttPaused = true;
 
