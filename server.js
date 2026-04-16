@@ -40,10 +40,8 @@ const WHISPER_FR_HALLUCINATION_HINTS = [
   "merci d'avoir regardé",
   "merci d'avoir regardé cette vidéo",
   "abonnez-vous",
-  "like",
   "commentaire",
   "n'oubliez pas",
-  "à bientôt",
   "merci et à bientôt",
   "transcription",
 ];
@@ -344,8 +342,8 @@ async function playText(ws, session, text) {
 }
 
 /**
- * Coupe le STT pendant tout le TTS ElevenLabs puis 1 s après la fin (évite que Whisper
- * retranscrive la voix synthétique). Remet sttPaused à false ensuite.
+ * Coupe le STT pendant tout le TTS ElevenLabs puis un délai après la fin (`TTS_POST_PLAY_MS`,
+ * défaut 2500 ms — évite que Whisper retranscrive la voix synthétique). Remet sttPaused à false ensuite.
  */
 function createPlayTextWithSttGuard(sleepFn, postPlayMs) {
   return async function playTextWithSttGuard(ws, session, text) {
@@ -399,7 +397,7 @@ wss.on("connection", (ws) => {
   const STREAM_SAMPLE_RATE = 8000; // Twilio μ-law 8kHz
   const MIN_BYTES_TO_TRANSCRIBE = Number(process.env.STT_MIN_BYTES || 4000);
   const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 3000);
-  const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 1000);
+  const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 2500);
   const playTextWithSttGuard = createPlayTextWithSttGuard(sleep, TTS_POST_PLAY_MS);
 
   const session = {
@@ -572,12 +570,12 @@ wss.on("connection", (ws) => {
 
         // Whisper anti-hallucination guard:
         // - ignore known subtitle / YouTube-style artifacts (liste FR)
-        // - ignore fragments shorter than 4 words
+        // - ignore fragments shorter than 3 words
         const normalized = transcript.toLowerCase();
         const matchesKnownHallucination = WHISPER_FR_HALLUCINATION_HINTS.some((hint) =>
           normalized.includes(hint)
         );
-        if (matchesKnownHallucination || wordCount < 4) {
+        if (matchesKnownHallucination || wordCount < 3) {
           console.log(`⚠️ Ignored likely hallucinated transcript (${wordCount} mots, contenu non journalisé)`);
           session.n8nInFlight = false;
           return;
