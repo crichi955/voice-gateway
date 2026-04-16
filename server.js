@@ -31,6 +31,23 @@ function parseBool(v) {
 const KILL_SWITCH_ENABLED = parseBool(process.env.KILL_SWITCH);
 /** Si `DEBUG_TRANSCRIPT=true`, journalise le texte intégral envoyé à n8n (débogage court terme uniquement). */
 const DEBUG_TRANSCRIPT = parseBool(process.env.DEBUG_TRANSCRIPT);
+
+/** Fragments souvent hallucinés par Whisper (FR) sur du silence / bruit — comparaison en minuscules. */
+const WHISPER_FR_HALLUCINATION_HINTS = [
+  "sous-titres",
+  "sous-titrage",
+  "amara",
+  "merci d'avoir regardé",
+  "merci d'avoir regardé cette vidéo",
+  "abonnez-vous",
+  "like",
+  "commentaire",
+  "n'oubliez pas",
+  "à bientôt",
+  "merci et à bientôt",
+  "transcription",
+];
+
 let killNow = false;
 if (KILL_SWITCH_ENABLED) {
   console.log("🛑 KILL_SWITCH enabled: will disable everything in 10s...");
@@ -554,10 +571,13 @@ wss.on("connection", (ws) => {
         }
 
         // Whisper anti-hallucination guard:
-        // - ignore known subtitle artifacts
-        // - ignore fragments shorter than 3 words
+        // - ignore known subtitle / YouTube-style artifacts (liste FR)
+        // - ignore fragments shorter than 4 words
         const normalized = transcript.toLowerCase();
-        if (normalized.includes("sous-titres") || normalized.includes("amara") || wordCount < 3) {
+        const matchesKnownHallucination = WHISPER_FR_HALLUCINATION_HINTS.some((hint) =>
+          normalized.includes(hint)
+        );
+        if (matchesKnownHallucination || wordCount < 4) {
           console.log(`⚠️ Ignored likely hallucinated transcript (${wordCount} mots, contenu non journalisé)`);
           session.n8nInFlight = false;
           return;
