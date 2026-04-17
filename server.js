@@ -499,7 +499,7 @@ async function playText(ws, session, text) {
 
 /**
  * Coupe le STT pendant tout le TTS ElevenLabs puis un délai après la fin (`TTS_POST_PLAY_MS`,
- * défaut 800 ms — évite de renvoyer l'audio synthétique au STT). Remet sttPaused à false ensuite.
+ * défaut 1000 ms — évite de renvoyer l'audio synthétique au STT). Remet sttPaused à false ensuite.
  */
 function createPlayTextWithSttGuard(sleepFn, postPlayMs) {
   return async function playTextWithSttGuard(ws, session, text) {
@@ -687,8 +687,8 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
 wss.on("connection", (ws) => {
   console.log("✅ Twilio WS connected");
 
-  const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 4000);
-  const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 800);
+  const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 1000);
+  const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 1000);
   const playTextWithSttGuard = createPlayTextWithSttGuard(sleep, TTS_POST_PLAY_MS);
 
   const session = {
