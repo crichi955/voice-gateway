@@ -86,6 +86,9 @@ app.get("/debug-ulaw", async (req, res) => {
 const AAI_MIN_SEND_BYTES = Number(process.env.AAI_MIN_SEND_BYTES || 400); // 50 ms
 const AAI_MAX_SEND_BYTES = Number(process.env.AAI_MAX_SEND_BYTES || 8000); // 1000 ms
 
+/** Nombre minimum de mots (tour AssemblyAI final) avant envoi à n8n — défaut 3. */
+const STT_MIN_WORDS_FOR_N8N = Math.max(1, Math.floor(Number(process.env.STT_MIN_WORDS_FOR_N8N ?? 3)) || 3);
+
 /** Fragments souvent hallucinés (FR) — comparaison en minuscules. */
 const STT_HALLUCINATION_HINTS_FR = [
   "sous-titres",
@@ -574,6 +577,14 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
     console.log(`📝 transcript tour final (${wordCount} mots)`);
 
     if (!transcript) {
+      session.n8nInFlight = false;
+      return;
+    }
+
+    if (wordCount < STT_MIN_WORDS_FOR_N8N) {
+      console.log(
+        `⚠️ STT ignoré (trop court: ${wordCount} mot(s), minimum ${STT_MIN_WORDS_FOR_N8N} pour n8n)`
+      );
       session.n8nInFlight = false;
       return;
     }
