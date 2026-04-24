@@ -742,14 +742,13 @@ wss.on("connection", (ws) => {
 
     try {
       const to = toWhatsAppTo(sessionToUse.fromNumber);
-      const link = process.env.WHATSAPP_FALLBACK_URL;
-      if (link) {
+      if (to) {
         await sendWhatsApp({
           to,
-          body: `Voici le lien pour la suite : ${link}`,
+          body: "Votre question a été transmise au médecin. Il vous recontactera rapidement. En cas d'urgence, appelez le 15 ou le 112.",
         });
       } else {
-        console.log("⚠️ WHATSAPP_FALLBACK_URL not set; WhatsApp not sent.");
+        console.log("⚠️ WhatsApp not sent (missing recipient).");
       }
     } catch (err) {
       console.log("❌ WhatsApp degraded error:", err?.message || err);
