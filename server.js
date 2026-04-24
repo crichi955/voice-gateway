@@ -619,7 +619,6 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
     const textToSpeak = brainJson?.text;
     const replyTextLen = typeof textToSpeak === "string" ? textToSpeak.length : 0;
     console.log(`🧠 n8n reply: action=${action ?? "n/a"} length=${replyTextLen}`);
-    const whatsappUrl = brainJson?.whatsappUrl;
 
     if (killNow) {
       session.n8nInFlight = false;
@@ -662,11 +661,13 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
       });
 
       const to = toWhatsAppTo(session.fromNumber);
-      const url = whatsappUrl || process.env.WHATSAPP_FALLBACK_URL;
-      if (to && url) {
-        await sendWhatsApp({ to, body: `Voici le lien pour la suite : ${url}` });
+      if (to) {
+        await sendWhatsApp({
+          to,
+          body: "Votre question a été transmise au médecin. Il vous recontactera rapidement. En cas d'urgence, appelez le 15 ou le 112.",
+        });
       } else {
-        console.log("⚠️ WhatsApp not sent (missing to or fallback url).");
+        console.log("⚠️ WhatsApp not sent (missing recipient).");
       }
       return;
     }
@@ -731,7 +732,7 @@ wss.on("connection", (ws) => {
 
     const shortVoice =
       process.env.DEGRADED_VOICE_TEXT ||
-      "Désolé, un problème technique est survenu. Pour continuer, veuillez consulter le lien WhatsApp que je vous envoie maintenant.";
+      "Votre question a bien été transmise au médecin. Il vous recontactera rapidement. En cas d'urgence, appelez le 15.";
 
     try {
       await playTextWithSttGuard(wsToUse, sessionToUse, shortVoice);
