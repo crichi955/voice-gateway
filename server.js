@@ -515,12 +515,8 @@ function createPlayTextWithSttGuard(sleepFn, postPlayMs) {
 }
 
 async function callN8nForTurn({ transcript, session }) {
-  const brainUrl = getValidN8nBrainUrl();
-  if (!brainUrl) throw new Error("Missing N8N_BRAIN_URL.");
-
-  const controller = new AbortController();
-  const timeoutMs = 5_000;
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  console.log("🧠 callN8nForTurn ENTER | env N8N_BRAIN_URL =", process.env.N8N_BRAIN_URL);
+  if (!getValidN8nBrainUrl()) throw new Error("Missing N8N_BRAIN_URL.");
 
   const phone = session.fromNumber ?? null;
   const payload = {
@@ -535,27 +531,40 @@ async function callN8nForTurn({ transcript, session }) {
     state: {},
   };
 
+  console.log("🧠 About to call n8n:", process.env.N8N_BRAIN_URL);
+
+  let res;
+  let rawText;
+
   try {
-    const resp = await fetch(brainUrl, {
+    res = await fetch(process.env.N8N_BRAIN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: controller.signal,
     });
 
-    if (!resp.ok) {
-      const txt = await resp.text().catch(() => "");
-      throw new Error(`n8n error: ${resp.status} ${resp.statusText} ${txt}`);
+    rawText = await res.text();
+    console.log("🧠 n8n status:", res.status, res.statusText);
+    console.log("🧠 n8n rawText:", rawText);
+
+    if (!res.ok) throw new Error("n8n HTTP " + res.status + " " + res.statusText);
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      throw new Error("n8n returned non-JSON: " + rawText.slice(0, 200));
     }
-    const data = await resp.json();
-    const raw = data?.action ?? data?.json?.action ?? data?.body?.action;
-    const action = String(raw || "").trim().toLowerCase();
-    console.log("🎯 n8n raw response:", JSON.stringify(data));
+
+    const action = String(data?.action || "").trim().toLowerCase();
     console.log("🎯 action parsed:", action);
     data.action = action;
     return data;
-  } finally {
-    clearTimeout(timeout);
+  } catch (err) {
+    console.error("💥 PIPELINE ERROR DETAILS:", err?.message);
+    console.error(err?.stack);
+    console.error("💥 last n8n rawText:", rawText?.slice?.(0, 500));
+    throw err;
   }
 }
 
@@ -626,6 +635,7 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
     if (DEBUG_TRANSCRIPT) {
       console.log(`🐛 DEBUG_TRANSCRIPT: ${wordCount} mots | texte capté:`, transcript);
     }
+    console.log("🧠 Will call n8n now | transcript =", transcript);
     const brainJson = await callN8nForTurn({ transcript, session });
     const action = brainJson?.action;
     const textToSpeak = brainJson?.text;
