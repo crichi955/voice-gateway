@@ -635,7 +635,22 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
 
     session.n8nInFlight = false;
 
-    if (!action || !textToSpeak) {
+    if (!action) {
+      await degradedFallback(ws, session, "n8n invalid response");
+      return;
+    }
+
+    if (action === "rdv") {
+      session.responded = true;
+      await playTextWithSttGuard(
+        ws,
+        session,
+        "Bien sûr, je vous envoie un WhatsApp avec les options disponibles."
+      );
+      return;
+    }
+
+    if (!textToSpeak) {
       await degradedFallback(ws, session, "n8n invalid response");
       return;
     }
