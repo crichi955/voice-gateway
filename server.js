@@ -544,6 +544,15 @@ async function callN8nForTurn({ transcript, session }) {
     });
 
     rawText = await res.text();
+    if (!rawText || !rawText.trim()) {
+      console.warn("🧠 n8n returned empty body, forcing fallback");
+      return {
+        action: "fallback",
+        text: "Je transmets votre demande au médecin.",
+        whatsappUrl: process.env.WHATSAPP_FALLBACK_URL,
+        transcript,
+      };
+    }
     console.log("🧠 n8n status:", res.status, res.statusText);
     console.log("🧠 n8n rawText:", rawText);
 
