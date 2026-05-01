@@ -548,6 +548,11 @@ async function callN8nForTurn({ transcript, session }) {
       throw new Error(`n8n error: ${resp.status} ${resp.statusText} ${txt}`);
     }
     const data = await resp.json();
+    const raw = data?.action ?? data?.json?.action ?? data?.body?.action;
+    const action = String(raw || "").trim().toLowerCase();
+    console.log("🎯 n8n raw response:", JSON.stringify(data));
+    console.log("🎯 action parsed:", action);
+    data.action = action;
     return data;
   } finally {
     clearTimeout(timeout);
