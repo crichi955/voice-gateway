@@ -522,8 +522,15 @@ async function callN8nForTurn({ transcript, session }) {
   const timeoutMs = 5_000;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
+  const phone = session.fromNumber ?? null;
   const payload = {
-    call: { provider: "twilio", streamSid: session.streamSid, callSid: session.callSid },
+    call: {
+      provider: "twilio",
+      streamSid: session.streamSid,
+      callSid: session.callSid,
+      fromNumber: phone,
+      callerNumber: phone,
+    },
     turn: { text: transcript },
     state: {},
   };
