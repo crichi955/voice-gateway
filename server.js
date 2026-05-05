@@ -445,12 +445,12 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
     }
 
     if (action === "rdv") {
-      session.responded = true;
       await playTextWithSttGuard(
         ws,
         session,
         "Bien sûr, je vous envoie un WhatsApp avec les options disponibles."
       );
+      session.responded = true;
       return;
     }
 
@@ -546,6 +546,8 @@ wss.on("connection", (ws) => {
         finish(() => resolve());
       }, 120_000);
       try {
+        session.allowAudio = true;
+        console.log("🗣️ response.create (TTS) sending, allowAudio=", session.allowAudio);
         oai.send(
           JSON.stringify({
             type: "response.create",
@@ -555,6 +557,7 @@ wss.on("connection", (ws) => {
           })
         );
       } catch (e) {
+        session.allowAudio = false;
         finish(() => reject(e));
       }
     });
@@ -643,12 +646,34 @@ wss.on("connection", (ws) => {
           return;
         }
 
+        if (msg.type === "session.updated") {
+          console.log("✅ session.updated received", msg.session?.turn_detection);
+          if (!session.didWelcome) {
+            session.didWelcome = true;
+            session.allowAudio = true;
+            session._welcomeResponsePending = true;
+            session.openAiWs.send(
+              JSON.stringify({
+                type: "response.create",
+                response: {
+                  instructions:
+                    "Dis exactement : Cabinet du Dr Crichi, bonjour. En cas d'urgence médicale, appelez le 15 immédiatement. Comment puis-je vous aider ?",
+                },
+              })
+            );
+          }
+          return;
+        }
+
         if (msg.type === "response.created") {
           session.openAiResponseInProgress = true;
           return;
         }
 
         if (msg.type === "response.audio.delta") {
+          if (!session.allowAudio) return;
+          session._deltaCount = (session._deltaCount || 0) + 1;
+          if (session._deltaCount % 50 === 0) console.log("🔊 audio delta passing", session._deltaCount);
           const deltaB64 = msg.delta;
           if (deltaB64 && session.streamSid && twilioWs.readyState === WebSocket.OPEN) {
             twilioWs.send(
@@ -693,10 +718,13 @@ wss.on("connection", (ws) => {
           return;
         }
 
-        if (msg.type === "response.done") {
+        if (msg.type === "response.done" || msg.type === "response.completed") {
+          const wasWelcome = session._welcomeResponsePending;
+          session.allowAudio = false;
           session.openAiResponseInProgress = false;
-          if (session._welcomeResponsePending) {
-            session._welcomeResponsePending = false;
+          session._welcomeResponsePending = false;
+          console.log("✅ response finished -> flags reset", msg.type);
+          if (wasWelcome) {
             void (async () => {
               await sleep(800);
               session.sttPaused = false;
@@ -748,23 +776,7 @@ wss.on("connection", (ws) => {
               },
             })
           );
-
-          if (session.openAiResponseInProgress) {
-            return;
-          }
-          session.openAiResponseInProgress = true;
-
-          session._welcomeResponsePending = true;
-
-          oaiWs.send(
-            JSON.stringify({
-              type: "response.create",
-              response: {
-                instructions:
-                  "Dis exactement : Cabinet du Dr Crichi, bonjour. En cas d'urgence médicale, appelez le 15 immédiatement. Comment puis-je vous aider ?",
-              },
-            })
-          );
+          console.log("✅ session.update sent (turn_detection=null, manual responses only)");
         } catch (e) {
           if (!settledConnect) {
             settledConnect = true;
@@ -805,6 +817,8 @@ wss.on("connection", (ws) => {
     /** Segments filtrés (hallucination FR) d'affilée (réinitialisé après passage au STT réel). */
     consecutiveHallucinationStrikes: 0,
     audioPacketCount: 0,
+    allowAudio: false,
+    didWelcome: false,
   };
 
   ws.on("message", async (msg) => {
