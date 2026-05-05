@@ -661,6 +661,7 @@ wss.on("connection", (ws) => {
         }
 
         if (msg.type === "conversation.item.input_audio_transcription.completed") {
+          if (session.sttPaused) return;
           const transcript = (msg.transcript || "").trim();
           console.log("📝 transcript reçu:", transcript);
           const wc = transcript.trim().split(/\s+/).filter(Boolean).length;
@@ -691,6 +692,13 @@ wss.on("connection", (ws) => {
 
         if (msg.type === "response.done") {
           session.openAiResponseInProgress = false;
+          if (session._welcomeResponsePending) {
+            session._welcomeResponsePending = false;
+            void (async () => {
+              await sleep(800);
+              session.sttPaused = false;
+            })();
+          }
           const p = session._playDonePending;
           session._playDonePending = null;
           try {
@@ -748,6 +756,8 @@ wss.on("connection", (ws) => {
           }
           session.openAiResponseInProgress = true;
 
+          session._welcomeResponsePending = true;
+
           oaiWs.send(
             JSON.stringify({
               type: "response.create",
@@ -787,7 +797,7 @@ wss.on("connection", (ws) => {
     _playDonePending: null,
     /** `null` tant que le message d'accueil n'est pas terminé ; ensuite timestamp au-delà duquel l'écoute STT est autorisée. */
     listenReadyAt: null,
-    sttPaused: false,
+    sttPaused: true,
     responded: false,
     n8nInFlight: false,
     n8nMissingLogged: false,
