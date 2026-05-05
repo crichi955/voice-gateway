@@ -3,9 +3,8 @@ import OpenAI from "openai";
 import express from "express";
 import multer from "multer";
 import http from "http";
-import { writeFile, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import WebSocket, { WebSocketServer } from "ws";
-import { performance } from "node:perf_hooks";
 import nodemailer from "nodemailer";
 
 const openai = process.env.OPENAI_API_KEY
@@ -63,7 +62,7 @@ function parseBool(v) {
 const KILL_SWITCH_ENABLED = parseBool(process.env.KILL_SWITCH);
 /** Si `DEBUG_TRANSCRIPT=true`, journalise le texte intégral envoyé à n8n (débogage court terme uniquement). */
 const DEBUG_TRANSCRIPT = parseBool(process.env.DEBUG_TRANSCRIPT);
-/** Si `DEBUG_SAVE_ULAW=true`, enregistre le 1er segment μ-law Twilio→AssemblyAI sur disque (debug stream). */
+/** Si `DEBUG_SAVE_ULAW=true`, enregistre le 1er segment μ-law Twilio→OpenAI sur disque (debug stream). */
 const DEBUG_SAVE_ULAW = parseBool(process.env.DEBUG_SAVE_ULAW);
 const DEBUG_SAVE_ULAW_PATH = String(process.env.DEBUG_SAVE_ULAW_PATH || "/tmp/debug_segment.ulaw");
 
@@ -82,11 +81,7 @@ app.get("/debug-ulaw", async (req, res) => {
   }
 });
 
-/** AssemblyAI exige des chunks audio entre 50 ms et 1000 ms ; μ-law 8 kHz = 1 octet / échantillon. */
-const AAI_MIN_SEND_BYTES = Number(process.env.AAI_MIN_SEND_BYTES || 400); // 50 ms
-const AAI_MAX_SEND_BYTES = Number(process.env.AAI_MAX_SEND_BYTES || 8000); // 1000 ms
-
-/** Nombre minimum de mots (tour AssemblyAI final) avant envoi à n8n — défaut 3. */
+/** Nombre minimum de mots (tour transcription OpenAI Realtime) avant envoi à n8n — défaut 3. */
 const STT_MIN_WORDS_FOR_N8N = Math.max(1, Math.floor(Number(process.env.STT_MIN_WORDS_FOR_N8N ?? 3)) || 3);
 
 /** Fragments souvent hallucinés (FR) — comparaison en minuscules. */
@@ -117,101 +112,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildAssemblyAiRealtimeUrl() {
-  const base = String(process.env.ASSEMBLYAI_STREAMING_URL || "wss://streaming.assemblyai.com/v3/ws").replace(
-    /\/$/,
-    ""
-  );
-  const params = new URLSearchParams({
-    speech_model: "u3-rt-pro",
-    encoding: "pcm_mulaw",
-    sample_rate: "8000",
-    format_turns: "true",
-    language: "fr",
-  });
-  return `${base}?${params.toString()}`;
-}
-
-/**
- * Ouvre une session Universal Streaming v3 et attend le message `Begin`.
- * @param {string} apiKey
- * @param {number} handshakeTimeoutMs
- * @returns {Promise<WebSocket>}
- */
-function connectAssemblyAiWebSocket(apiKey, handshakeTimeoutMs = 15_000) {
-  const url = buildAssemblyAiRealtimeUrl();
-  const ws = new WebSocket(url, { headers: { Authorization: apiKey } });
-
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const timeoutId = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try {
-        ws.terminate();
-      } catch {
-        /* ignore */
-      }
-      ws.off("message", onMessage);
-      reject(new Error("AssemblyAI handshake timeout"));
-    }, handshakeTimeoutMs);
-
-    const cleanup = () => {
-      clearTimeout(timeoutId);
-      ws.off("error", onError);
-      ws.off("close", onClose);
-    };
-
-    const onError = (err) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      ws.off("message", onMessage);
-      reject(err instanceof Error ? err : new Error(String(err)));
-    };
-
-    const onClose = (code, reason) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      ws.off("message", onMessage);
-      const r = reason?.toString?.() || "";
-      reject(new Error(`AssemblyAI connection closed before session start (${code}) ${r}`.trim()));
-    };
-
-    const onMessage = (data) => {
-      let msg;
-      try {
-        msg = JSON.parse(data.toString());
-      } catch {
-        return;
-      }
-      if (msg?.type === "Begin") {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        ws.off("message", onMessage);
-        resolve(ws);
-      }
-    };
-
-    ws.on("message", onMessage);
-    ws.once("error", onError);
-    ws.once("close", onClose);
-  });
-}
-
-function terminateAssemblyAiSession(aaiWs) {
-  if (!aaiWs || aaiWs.readyState !== WebSocket.OPEN) return;
-  try {
-    aaiWs.send(JSON.stringify({ type: "Terminate" }));
-  } catch (err) {
-    console.log("⚠️ AssemblyAI Terminate send error:", err?.message || err);
-  }
-}
-
 function resetListeningBuffers(session) {
-  session.aaiUlawAccum = Buffer.alloc(0);
   session.lastFlushTs = Date.now();
 }
 
@@ -411,109 +312,6 @@ async function notifyDoctorDoubleChannel({ patientName, patientNumber, transcrip
   }
 }
 
-async function elevenLabsTextToMuLaw8000(text) {
-  const apiKey = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID;
-  if (!apiKey || !voiceId) {
-    throw new Error("Missing ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID.");
-  }
-
-  // Ask ElevenLabs for native telephony μ-law 8kHz output.
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=ulaw_8000`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "xi-api-key": apiKey,
-    },
-    body: JSON.stringify({
-      text,
-      model_id: process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2",
-    }),
-  });
-
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    throw new Error(`ElevenLabs error: ${resp.status} ${resp.statusText} ${txt}`);
-  }
-
-  const ab = await resp.arrayBuffer();
-  const audioBuffer = Buffer.from(ab);
-  const contentType = (resp.headers.get("content-type") || "").toLowerCase();
-  console.log(`🔊 ElevenLabs TTS content-type: ${contentType || "unknown"} | bytes: ${audioBuffer.length}`);
-  if (contentType.includes("mp3") || contentType.includes("mpeg") || contentType.includes("opus") || contentType.includes("wav")) {
-    console.log("⚠️ Unexpected TTS content-type for ulaw_8000; expected raw telephony audio.");
-  }
-
-  // ulaw_8000 response is already μ-law 8kHz.
-  return audioBuffer;
-}
-
-async function playMuLawToTwilio(ws, streamSid, muLawBuffer) {
-  if (!streamSid) return;
-  // 20ms @ 8000 Hz => 160 bytes (μ-law is 8-bit/byte).
-  const FRAME_MS = 20;
-  const CHUNK_BYTES = 160;
-  const SILENCE_BYTE = 0xff;
-  let frameIndex = 0;
-  const startedAt = performance.now();
-  const frames = [];
-
-  for (let i = 0; i < muLawBuffer.length; i += CHUNK_BYTES) {
-    const rawChunk = muLawBuffer.subarray(i, i + CHUNK_BYTES);
-    // Always send full 20ms frames to avoid timing/audio artifacts on tail frames.
-    frames.push(
-      rawChunk.length === CHUNK_BYTES
-        ? Buffer.from(rawChunk)
-        : Buffer.concat([rawChunk, Buffer.alloc(CHUNK_BYTES - rawChunk.length, SILENCE_BYTE)])
-    );
-  }
-
-  // Send pre-built frames at regular pace (no conversion/chunking work in the timing loop).
-  for (const chunk of frames) {
-    if (killNow) return;
-    const payload = Buffer.from(chunk).toString("base64");
-
-    // Anti-jitter scheduler: align each frame to a monotonic clock.
-    const targetAt = startedAt + frameIndex * FRAME_MS;
-    const now = performance.now();
-    if (targetAt > now) {
-      await sleep(targetAt - now);
-    }
-
-    ws.send(
-      JSON.stringify({
-        event: "media",
-        streamSid,
-        media: { payload },
-      })
-    );
-    frameIndex += 1;
-  }
-}
-
-async function playText(ws, session, text) {
-  const muLaw = await elevenLabsTextToMuLaw8000(text);
-  await playMuLawToTwilio(ws, session.streamSid, muLaw);
-}
-
-/**
- * Coupe le STT pendant tout le TTS ElevenLabs puis un délai après la fin (`TTS_POST_PLAY_MS`,
- * défaut 1000 ms — évite de renvoyer l'audio synthétique au STT). Remet sttPaused à false ensuite.
- */
-function createPlayTextWithSttGuard(sleepFn, postPlayMs) {
-  return async function playTextWithSttGuard(ws, session, text) {
-    session.sttPaused = true;
-    resetListeningBuffers(session);
-    try {
-      await playText(ws, session, text);
-    } finally {
-      await sleepFn(postPlayMs);
-      session.sttPaused = false;
-    }
-  };
-}
-
 async function callN8nForTurn({ transcript, session }) {
   console.log("🧠 callN8nForTurn ENTER | env N8N_BRAIN_URL =", process.env.N8N_BRAIN_URL);
   if (!getValidN8nBrainUrl()) throw new Error("Missing N8N_BRAIN_URL.");
@@ -575,24 +373,6 @@ async function callN8nForTurn({ transcript, session }) {
     console.error("💥 last n8n rawText:", rawText?.slice?.(0, 500));
     throw err;
   }
-}
-
-/**
- * Envoie le μ-law accumulé vers AssemblyAI par blocs conformes (50–1000 ms).
- */
-function flushAaiAudioSendBuffer(session) {
-  const aaiWs = session.aaiWs;
-  if (!aaiWs || aaiWs.readyState !== WebSocket.OPEN) return;
-  let buf = session.aaiUlawAccum;
-  if (!buf?.length) return;
-
-  while (buf.length >= AAI_MIN_SEND_BYTES) {
-    const take = Math.min(buf.length, AAI_MAX_SEND_BYTES);
-    const packet = buf.subarray(0, take);
-    buf = buf.subarray(take);
-    aaiWs.send(packet);
-  }
-  session.aaiUlawAccum = buf;
 }
 
 /**
@@ -736,45 +516,70 @@ wss.on("connection", (ws) => {
 
   const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 1000);
   const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 1000);
-  const playTextWithSttGuard = createPlayTextWithSttGuard(sleep, TTS_POST_PLAY_MS);
 
-  const session = {
-    callSid: null,
-    streamSid: null,
-    fromNumber: null,
-    patientName: null,
-    mediaCount: 0,
-    /** Tampon μ-law à envoyer à AssemblyAI (respect 50–1000 ms par envoi). */
-    aaiUlawAccum: Buffer.alloc(0),
-    lastFlushTs: Date.now(),
-    /** Client WebSocket AssemblyAI pour cet appel ; `null` si non connecté (ex. mode welcome-only). */
-    aaiWs: null,
-    /** `null` tant que le message d'accueil n'est pas terminé ; ensuite timestamp au-delà duquel l'écoute STT est autorisée. */
-    listenReadyAt: null,
-    sttPaused: false,
-    responded: false,
-    n8nInFlight: false,
-    n8nMissingLogged: false,
-    debugSegmentUlawSaved: false,
-    /** Nombre de réponses n8n `fallback` déjà reçues (les 2 premières sont ignorées). */
-    transcriptAttempts: 0,
-    /** Segments filtrés (hallucination FR) d'affilée (réinitialisé après passage au STT réel). */
-    consecutiveHallucinationStrikes: 0,
-  };
+  async function playTextOpenAIRealtime(twilioWs, session, text) {
+    const oai = session.openAiWs;
+    if (!oai || oai.readyState !== WebSocket.OPEN) {
+      console.log("⚠️ playTextOpenAIRealtime: OpenAI WS not open");
+      return;
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timeoutId = null;
+      const finish = (fn) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId) clearTimeout(timeoutId);
+        session._playDonePending = null;
+        fn();
+      };
+      session._playDonePending = {
+        resolve: () => finish(() => resolve()),
+        reject: (e) => finish(() => reject(e)),
+      };
+      timeoutId = setTimeout(() => {
+        console.log("⚠️ playTextOpenAIRealtime: timeout waiting response.done");
+        finish(() => resolve());
+      }, 120_000);
+      try {
+        oai.send(
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              instructions: `Dis exactement ce texte, sans rien ajouter ni reformuler : ${text}`,
+            },
+          })
+        );
+      } catch (e) {
+        finish(() => reject(e));
+      }
+    });
+  }
+
+  /**
+   * Coupe le STT pendant toute la réponse audio OpenAI Realtime puis un délai après la fin (`TTS_POST_PLAY_MS`,
+   * défaut 1000 ms — évite de renvoyer l'audio synthétique au STT). Remet sttPaused à false ensuite.
+   */
+  function createPlayTextWithSttGuard(sleepFn, postPlayMs) {
+    return async function playTextWithSttGuard(wsToUse, sessionToUse, text) {
+      sessionToUse.sttPaused = true;
+      resetListeningBuffers(sessionToUse);
+      try {
+        await playTextOpenAIRealtime(wsToUse, sessionToUse, text);
+      } finally {
+        await sleepFn(postPlayMs);
+        sessionToUse.sttPaused = false;
+      }
+    };
+  }
+
+  const playTextWithSttGuard = createPlayTextWithSttGuard(sleep, TTS_POST_PLAY_MS);
 
   async function degradedFallback(wsToUse, sessionToUse, reason) {
     if (sessionToUse.responded) return;
     sessionToUse.responded = true;
 
     console.log("⚠️ Degraded mode:", reason);
-
-    terminateAssemblyAiSession(sessionToUse.aaiWs);
-    try {
-      sessionToUse.aaiWs?.close();
-    } catch {
-      /* ignore */
-    }
-    sessionToUse.aaiWs = null;
 
     const shortVoice =
       process.env.DEGRADED_VOICE_TEXT ||
@@ -784,6 +589,15 @@ wss.on("connection", (ws) => {
       await playTextWithSttGuard(wsToUse, sessionToUse, shortVoice);
     } catch (err) {
       console.log("❌ TTS degraded error:", err?.message || err);
+    }
+
+    if (sessionToUse.openAiWs) {
+      try {
+        sessionToUse.openAiWs.close();
+      } catch {
+        /* ignore */
+      }
+      sessionToUse.openAiWs = null;
     }
 
     try {
@@ -801,37 +615,168 @@ wss.on("connection", (ws) => {
     }
   }
 
-  function attachAssemblyAiInboundHandler(aaiWs) {
-    aaiWs.on("message", (data) => {
-      if (killNow) return;
-      let msg;
-      try {
-        msg = JSON.parse(data.toString());
-      } catch {
-        return;
-      }
+  function connectOpenAIRealtime(session, twilioWs) {
+    return new Promise((resolve, reject) => {
+      let settledConnect = false;
 
-      if (msg.type === "Termination") {
-        console.log("ℹ️ AssemblyAI Termination", msg);
-        return;
-      }
+      const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
+      const url = "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini";
+      const oaiWs = new WebSocket(url, {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "OpenAI-Beta": "realtime=v1",
+        },
+      });
 
-      if (msg.type !== "Turn" || !msg.end_of_turn) return;
+      oaiWs.on("message", (data) => {
+        if (killNow) return;
+        let msg;
+        try {
+          msg = JSON.parse(data.toString());
+        } catch {
+          return;
+        }
 
-      if (!session.streamSid) return;
-      if (session.sttPaused || session.responded) return;
-      if (session.listenReadyAt == null || Date.now() < session.listenReadyAt) return;
+        if (msg.type === "response.audio.delta") {
+          const deltaB64 = msg.delta;
+          if (deltaB64 && session.streamSid && twilioWs.readyState === WebSocket.OPEN) {
+            twilioWs.send(
+              JSON.stringify({
+                event: "media",
+                streamSid: session.streamSid,
+                media: { payload: deltaB64 },
+              })
+            );
+          }
+          return;
+        }
 
-      if (!getValidN8nBrainUrl()) return;
+        if (msg.type === "conversation.item.input_audio_transcription.completed") {
+          const transcript = (msg.transcript || "").trim();
+          const wc = transcript.trim().split(/\s+/).filter(Boolean).length;
+          if (wc < 3) return;
+          if (!getValidN8nBrainUrl()) return;
+          if (!session.streamSid) return;
+          if (session.sttPaused || session.responded) return;
+          if (session.listenReadyAt == null || Date.now() < session.listenReadyAt) return;
+          void handleFinalUserTranscript(twilioWs, session, transcript, playTextWithSttGuard, degradedFallback);
+          return;
+        }
 
-      const transcript = (msg.transcript || "").trim();
-      void handleFinalUserTranscript(ws, session, transcript, playTextWithSttGuard, degradedFallback);
-    });
+        if (msg.type === "error") {
+          console.log("❌ OpenAI Realtime error:", msg.error || msg);
+          const p = session._playDonePending;
+          session._playDonePending = null;
+          try {
+            p?.reject?.(new Error(msg.error?.message || JSON.stringify(msg.error || msg)));
+          } catch {
+            /* ignore */
+          }
+          void degradedFallback(twilioWs, session, "OpenAI Realtime error");
+          return;
+        }
 
-    aaiWs.on("error", (err) => {
-      console.log("❌ AssemblyAI WS error:", err?.message || err);
+        if (msg.type === "response.done") {
+          const p = session._playDonePending;
+          session._playDonePending = null;
+          try {
+            p?.resolve?.();
+          } catch {
+            /* ignore */
+          }
+        }
+      });
+
+      oaiWs.on("error", (err) => {
+        console.log("❌ OpenAI Realtime WS error:", err?.message || err);
+        if (!settledConnect) {
+          settledConnect = true;
+          reject(err instanceof Error ? err : new Error(String(err)));
+        } else {
+          void degradedFallback(twilioWs, session, "OpenAI Realtime WS error");
+        }
+      });
+
+      oaiWs.on("close", () => {
+        if (session.openAiWs === oaiWs) {
+          session.openAiWs = null;
+        }
+      });
+
+      oaiWs.on("open", () => {
+        session.openAiWs = oaiWs;
+
+        try {
+          oaiWs.send(
+            JSON.stringify({
+              type: "session.update",
+              session: {
+                type: "realtime",
+                modalities: ["audio", "text"],
+                instructions:
+                  "Tu es un agent vocal de standard médical pour le cabinet du Dr Crichi. Tu réponds uniquement selon la FAQ fournie. En cas d'urgence tu dis d'appeler le 15 ou le 112. Tu ne donnes jamais de diagnostic ni d'avis médical. Tu parles uniquement en français.",
+                voice: "marin",
+                input_audio_format: "g711_ulaw",
+                output_audio_format: "g711_ulaw",
+                input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+                turn_detection: {
+                  type: "server_vad",
+                  threshold: 0.5,
+                  prefix_padding_ms: 300,
+                  silence_duration_ms: 600,
+                },
+                tool_choice: "auto",
+              },
+            })
+          );
+
+          oaiWs.send(
+            JSON.stringify({
+              type: "response.create",
+              response: {
+                instructions:
+                  "Dis exactement : Cabinet du Dr Crichi, bonjour. En cas d'urgence médicale, appelez le 15 immédiatement. Comment puis-je vous aider ?",
+              },
+            })
+          );
+        } catch (e) {
+          if (!settledConnect) {
+            settledConnect = true;
+            reject(e);
+          }
+          return;
+        }
+
+        if (!settledConnect) {
+          settledConnect = true;
+          resolve();
+        }
+        console.log("✅ OpenAI Realtime streaming session ready");
+      });
     });
   }
+
+  const session = {
+    callSid: null,
+    streamSid: null,
+    fromNumber: null,
+    patientName: null,
+    mediaCount: 0,
+    lastFlushTs: Date.now(),
+    /** Client WebSocket OpenAI Realtime pour cet appel. */
+    openAiWs: null,
+    _playDonePending: null,
+    /** `null` tant que le message d'accueil n'est pas terminé ; ensuite timestamp au-delà duquel l'écoute STT est autorisée. */
+    listenReadyAt: null,
+    sttPaused: false,
+    responded: false,
+    n8nInFlight: false,
+    n8nMissingLogged: false,
+    /** Nombre de réponses n8n `fallback` déjà reçues (les 2 premières sont ignorées). */
+    transcriptAttempts: 0,
+    /** Segments filtrés (hallucination FR) d'affilée (réinitialisé après passage au STT réel). */
+    consecutiveHallucinationStrikes: 0,
+  };
 
   ws.on("message", async (msg) => {
     let evt;
@@ -864,41 +809,28 @@ wss.on("connection", (ws) => {
 
       console.log("▶️ start", { callSid: session.callSid, streamSid: session.streamSid });
 
-      const wantsBrain = Boolean(getValidN8nBrainUrl());
-      const assemblyKey = String(process.env.ASSEMBLYAI_API_KEY || "").trim();
+      const openaiKey = String(process.env.OPENAI_API_KEY || "").trim();
 
-      if (wantsBrain) {
-        if (!assemblyKey) {
-          console.log("❌ ASSEMBLYAI_API_KEY missing");
-          await degradedFallback(ws, session, "missing ASSEMBLYAI_API_KEY");
-          return;
-        }
-
-        try {
-          const aaiWs = await connectAssemblyAiWebSocket(assemblyKey);
-          session.aaiWs = aaiWs;
-          attachAssemblyAiInboundHandler(aaiWs);
-          console.log("✅ AssemblyAI streaming session ready");
-        } catch (err) {
-          console.log("❌ AssemblyAI connect error:", err?.message || err);
-          await degradedFallback(ws, session, "AssemblyAI connection failed");
-          return;
-        }
+      if (!openaiKey) {
+        console.log("❌ OPENAI_API_KEY missing");
+        await degradedFallback(ws, session, "missing OPENAI_API_KEY");
+        session.listenReadyAt = Date.now() + POST_WELCOME_LISTEN_DELAY_MS;
+        session.lastFlushTs = Date.now();
+        return;
       }
 
       try {
-        if (!session.responded) {
-          const welcomeText =
-            process.env.WELCOME_TEXT ||
-            "Cabinet du Dr Crichi, je vous écoute.";
-          await playTextWithSttGuard(ws, session, welcomeText);
-        }
+        await connectOpenAIRealtime(session, ws);
       } catch (err) {
-        console.log("❌ Welcome TTS error:", err?.message || err);
-      } finally {
+        console.log("❌ OpenAI Realtime connect error:", err?.message || err);
+        await degradedFallback(ws, session, "OpenAI Realtime connection failed");
         session.listenReadyAt = Date.now() + POST_WELCOME_LISTEN_DELAY_MS;
         session.lastFlushTs = Date.now();
+        return;
       }
+
+      session.listenReadyAt = Date.now() + POST_WELCOME_LISTEN_DELAY_MS;
+      session.lastFlushTs = Date.now();
 
       return;
     }
@@ -917,28 +849,24 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      const aaiWs = session.aaiWs;
-      if (!aaiWs || aaiWs.readyState !== WebSocket.OPEN) return;
+      const oaiWs = session.openAiWs;
+      if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) return;
 
       session.mediaCount++;
 
       const b64 = evt.media?.payload;
       if (!b64) return;
 
-      const chunk = Buffer.from(b64, "base64");
-      session.aaiUlawAccum = session.aaiUlawAccum.length
-        ? Buffer.concat([session.aaiUlawAccum, chunk])
-        : chunk;
-
-      if (DEBUG_SAVE_ULAW && !session.debugSegmentUlawSaved && session.aaiUlawAccum.length >= AAI_MIN_SEND_BYTES) {
-        session.debugSegmentUlawSaved = true;
-        const snap = session.aaiUlawAccum.subarray(0, Math.min(session.aaiUlawAccum.length, AAI_MAX_SEND_BYTES));
-        void writeFile(DEBUG_SAVE_ULAW_PATH, snap)
-          .then(() => console.log(`🐛 DEBUG_SAVE_ULAW: ${snap.length} octets → ${DEBUG_SAVE_ULAW_PATH}`))
-          .catch((err) => console.log("⚠️ DEBUG_SAVE_ULAW write error:", err?.message || err));
+      try {
+        oaiWs.send(
+          JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: b64,
+          })
+        );
+      } catch (err) {
+        console.log("❌ OpenAI input_audio_buffer.append error:", err?.message || err);
       }
-
-      flushAaiAudioSendBuffer(session);
       session.lastFlushTs = Date.now();
 
       return;
@@ -948,28 +876,28 @@ wss.on("connection", (ws) => {
     if (evt.event === "stop") {
       console.log("⏹️ stop", evt.stop);
       console.log(`✅ total media packets: ${session.mediaCount}`);
-      flushAaiAudioSendBuffer(session);
-      terminateAssemblyAiSession(session.aaiWs);
-      try {
-        session.aaiWs?.close();
-      } catch {
-        /* ignore */
+      if (session.openAiWs) {
+        try {
+          session.openAiWs.close();
+        } catch {
+          /* ignore */
+        }
+        session.openAiWs = null;
       }
-      session.aaiWs = null;
       return;
     }
   });
 
   ws.on("close", () => {
     console.log("❌ Twilio WS closed");
-    flushAaiAudioSendBuffer(session);
-    terminateAssemblyAiSession(session.aaiWs);
-    try {
-      session.aaiWs?.close();
-    } catch {
-      /* ignore */
+    if (session.openAiWs) {
+      try {
+        session.openAiWs.close();
+      } catch {
+        /* ignore */
+      }
+      session.openAiWs = null;
     }
-    session.aaiWs = null;
   });
 });
 
