@@ -571,7 +571,7 @@ wss.on("connection", (ws) => {
       try {
         await playTextOpenAIRealtime(wsToUse, sessionToUse, text);
       } finally {
-        await sleepFn(postPlayMs);
+        await sleep(500);
         sessionToUse.sttPaused = false;
       }
     };
@@ -647,6 +647,7 @@ wss.on("connection", (ws) => {
         }
 
         if (msg.type === "response.audio.delta") {
+          if (session.sttPaused && !session._welcomeResponsePending) return;
           const deltaB64 = msg.delta;
           if (deltaB64 && session.streamSid && twilioWs.readyState === WebSocket.OPEN) {
             twilioWs.send(
