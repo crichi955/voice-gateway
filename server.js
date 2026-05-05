@@ -523,6 +523,10 @@ wss.on("connection", (ws) => {
       console.log("⚠️ playTextOpenAIRealtime: OpenAI WS not open");
       return;
     }
+    if (session.openAiResponseInProgress) {
+      return;
+    }
+    session.openAiResponseInProgress = true;
     return new Promise((resolve, reject) => {
       let settled = false;
       let timeoutId = null;
@@ -637,6 +641,11 @@ wss.on("connection", (ws) => {
           return;
         }
 
+        if (msg.type === "response.created") {
+          session.openAiResponseInProgress = true;
+          return;
+        }
+
         if (msg.type === "response.audio.delta") {
           const deltaB64 = msg.delta;
           if (deltaB64 && session.streamSid && twilioWs.readyState === WebSocket.OPEN) {
@@ -653,6 +662,7 @@ wss.on("connection", (ws) => {
 
         if (msg.type === "conversation.item.input_audio_transcription.completed") {
           const transcript = (msg.transcript || "").trim();
+          console.log("📝 transcript reçu:", transcript);
           const wc = transcript.trim().split(/\s+/).filter(Boolean).length;
           if (wc < 3) return;
           if (!getValidN8nBrainUrl()) return;
@@ -660,6 +670,7 @@ wss.on("connection", (ws) => {
           if (session.sttPaused || session.responded) return;
           if (session.listenReadyAt == null || Date.now() < session.listenReadyAt) return;
           void handleFinalUserTranscript(twilioWs, session, transcript, playTextWithSttGuard, degradedFallback);
+          console.log("➡️ envoi n8n:", transcript);
           return;
         }
 
@@ -677,6 +688,7 @@ wss.on("connection", (ws) => {
         }
 
         if (msg.type === "response.done") {
+          session.openAiResponseInProgress = false;
           const p = session._playDonePending;
           session._playDonePending = null;
           try {
@@ -713,7 +725,7 @@ wss.on("connection", (ws) => {
               session: {
                 modalities: ["audio", "text"],
                 instructions:
-                  "Tu es un agent vocal de standard médical pour le cabinet du Dr Crichi. Tu réponds uniquement selon la FAQ fournie. En cas d'urgence tu dis d'appeler le 15 ou le 112. Tu ne donnes jamais de diagnostic ni d'avis médical. Tu parles uniquement en français.",
+                  "Tu es un agent vocal de standard médical pour le cabinet du Dr Crichi. Tu réponds uniquement selon la FAQ fournie. En cas d'urgence tu dis d'appeler le 15 ou le 112. Tu ne donnes jamais de diagnostic ni d'avis médical. Tu parles uniquement en français. Quand un patient mentionne rendez-vous, rdv, consultation, prendre un rendez-vous ou voir le médecin : réponds UNIQUEMENT et EXACTEMENT cette phrase : « Je vous envoie les options disponibles par WhatsApp. » Ne pose JAMAIS de questions sur le nom, les disponibilités ou le motif. Ne dis rien d'autre.",
                 voice: "marin",
                 input_audio_format: "g711_ulaw",
                 output_audio_format: "g711_ulaw",
@@ -728,6 +740,11 @@ wss.on("connection", (ws) => {
               },
             })
           );
+
+          if (session.openAiResponseInProgress) {
+            return;
+          }
+          session.openAiResponseInProgress = true;
 
           oaiWs.send(
             JSON.stringify({
@@ -764,6 +781,7 @@ wss.on("connection", (ws) => {
     lastFlushTs: Date.now(),
     /** Client WebSocket OpenAI Realtime pour cet appel. */
     openAiWs: null,
+    openAiResponseInProgress: false,
     _playDonePending: null,
     /** `null` tant que le message d'accueil n'est pas terminé ; ensuite timestamp au-delà duquel l'écoute STT est autorisée. */
     listenReadyAt: null,
