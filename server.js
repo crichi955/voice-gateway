@@ -567,11 +567,13 @@ wss.on("connection", (ws) => {
   function createPlayTextWithSttGuard(sleepFn, postPlayMs) {
     return async function playTextWithSttGuard(wsToUse, sessionToUse, text) {
       sessionToUse.sttPaused = true;
+      sessionToUse.ttsPlaying = true;
       resetListeningBuffers(sessionToUse);
       try {
         await playTextOpenAIRealtime(wsToUse, sessionToUse, text);
       } finally {
         await sleep(500);
+        sessionToUse.ttsPlaying = false;
         sessionToUse.sttPaused = false;
       }
     };
@@ -647,7 +649,7 @@ wss.on("connection", (ws) => {
         }
 
         if (msg.type === "response.audio.delta") {
-          if (session.sttPaused && !session._welcomeResponsePending) return;
+          if (session.ttsPlaying && !session._welcomeResponsePending) return;
           const deltaB64 = msg.delta;
           if (deltaB64 && session.streamSid && twilioWs.readyState === WebSocket.OPEN) {
             twilioWs.send(
@@ -799,6 +801,7 @@ wss.on("connection", (ws) => {
     /** `null` tant que le message d'accueil n'est pas terminé ; ensuite timestamp au-delà duquel l'écoute STT est autorisée. */
     listenReadyAt: null,
     sttPaused: true,
+    ttsPlaying: false,
     responded: false,
     n8nInFlight: false,
     n8nMissingLogged: false,
