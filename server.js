@@ -711,7 +711,6 @@ wss.on("connection", (ws) => {
             JSON.stringify({
               type: "session.update",
               session: {
-                type: "realtime",
                 modalities: ["audio", "text"],
                 instructions:
                   "Tu es un agent vocal de standard médical pour le cabinet du Dr Crichi. Tu réponds uniquement selon la FAQ fournie. En cas d'urgence tu dis d'appeler le 15 ou le 112. Tu ne donnes jamais de diagnostic ni d'avis médical. Tu parles uniquement en français.",
