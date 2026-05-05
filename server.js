@@ -669,6 +669,8 @@ wss.on("connection", (ws) => {
           if (!session.streamSid) return;
           if (session.sttPaused || session.responded) return;
           if (session.listenReadyAt == null || Date.now() < session.listenReadyAt) return;
+          session.openAiWs.send(JSON.stringify({ type: "response.cancel" }));
+          session.openAiResponseInProgress = false;
           void handleFinalUserTranscript(twilioWs, session, transcript, playTextWithSttGuard, degradedFallback);
           console.log("➡️ envoi n8n:", transcript);
           return;
