@@ -552,7 +552,7 @@ wss.on("connection", (ws) => {
           JSON.stringify({
             type: "response.create",
             response: {
-              modalities: ["audio"],
+              modalities: ["audio", "text"],
               voice: "marin",
               instructions: `Dis exactement ce texte, sans rien ajouter ni reformuler : ${text}`,
             },
@@ -658,7 +658,7 @@ wss.on("connection", (ws) => {
               JSON.stringify({
                 type: "response.create",
                 response: {
-                  modalities: ["audio"],
+                  modalities: ["audio", "text"],
                   voice: "marin",
                   instructions:
                     "Dis exactement : Cabinet du Dr Crichi, bonjour. En cas d'urgence médicale, appelez le 15 immédiatement. Comment puis-je vous aider ?",
