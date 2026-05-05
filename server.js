@@ -649,7 +649,6 @@ wss.on("connection", (ws) => {
         }
 
         if (msg.type === "response.audio.delta") {
-          if (session.ttsPlaying && !session._welcomeResponsePending) return;
           const deltaB64 = msg.delta;
           if (deltaB64 && session.streamSid && twilioWs.readyState === WebSocket.OPEN) {
             twilioWs.send(
@@ -675,6 +674,9 @@ wss.on("connection", (ws) => {
           if (session.listenReadyAt == null || Date.now() < session.listenReadyAt) return;
           session.openAiWs.send(JSON.stringify({ type: "response.cancel" }));
           session.openAiResponseInProgress = false;
+          session.openAiWs.send(JSON.stringify({
+            type: "input_audio_buffer.commit",
+          }));
           void handleFinalUserTranscript(twilioWs, session, transcript, playTextWithSttGuard, degradedFallback);
           console.log("➡️ envoi n8n:", transcript);
           return;
@@ -743,12 +745,7 @@ wss.on("connection", (ws) => {
                 input_audio_format: "g711_ulaw",
                 output_audio_format: "g711_ulaw",
                 input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
-                turn_detection: {
-                  type: "server_vad",
-                  threshold: 0.5,
-                  prefix_padding_ms: 300,
-                  silence_duration_ms: 600,
-                },
+                turn_detection: null,
                 tool_choice: "auto",
               },
             })
@@ -809,6 +806,7 @@ wss.on("connection", (ws) => {
     transcriptAttempts: 0,
     /** Segments filtrés (hallucination FR) d'affilée (réinitialisé après passage au STT réel). */
     consecutiveHallucinationStrikes: 0,
+    audioPacketCount: 0,
   };
 
   ws.on("message", async (msg) => {
@@ -897,6 +895,11 @@ wss.on("connection", (ws) => {
             audio: b64,
           })
         );
+        session.audioPacketCount += 1;
+        if (session.audioPacketCount >= 100) {
+          session.audioPacketCount = 0;
+          oaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        }
       } catch (err) {
         console.log("❌ OpenAI input_audio_buffer.append error:", err?.message || err);
       }
