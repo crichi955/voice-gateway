@@ -672,8 +672,6 @@ wss.on("connection", (ws) => {
           if (!session.streamSid) return;
           if (session.sttPaused || session.responded) return;
           if (session.listenReadyAt == null || Date.now() < session.listenReadyAt) return;
-          session.openAiWs.send(JSON.stringify({ type: "response.cancel" }));
-          session.openAiResponseInProgress = false;
           session.openAiWs.send(JSON.stringify({
             type: "input_audio_buffer.commit",
           }));
