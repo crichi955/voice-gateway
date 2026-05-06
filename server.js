@@ -81,8 +81,8 @@ app.get("/debug-ulaw", async (req, res) => {
   }
 });
 
-/** Nombre minimum de mots (tour transcription OpenAI Realtime) avant envoi à n8n — défaut 3. */
-const STT_MIN_WORDS_FOR_N8N = Math.max(1, Math.floor(Number(process.env.STT_MIN_WORDS_FOR_N8N ?? 3)) || 3);
+/** Nombre minimum de mots (tour transcription OpenAI Realtime) avant envoi à n8n — défaut 2. */
+const STT_MIN_WORDS_FOR_N8N = Math.max(1, Math.floor(Number(process.env.STT_MIN_WORDS_FOR_N8N ?? 2)) || 2);
 
 /** Fragments souvent hallucinés (FR) — comparaison en minuscules. */
 const STT_HALLUCINATION_HINTS_FR = [
