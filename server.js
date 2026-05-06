@@ -697,7 +697,7 @@ wss.on("connection", (ws) => {
 
         if (msg.type === "session.updated") {
           console.log("✅ session.updated received", msg.session?.turn_detection);
-          startEventTrace(15);
+          if (process.env.OAI_TRACE === "true") startEventTrace(15);
           if (!session.didWelcome) {
             session.didWelcome = true;
             session.allowAudio = true;
