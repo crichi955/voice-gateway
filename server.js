@@ -628,6 +628,42 @@ wss.on("connection", (ws) => {
     }
   }
 
+  let TRACE_ENABLED = false;
+  let TRACE_END_AT = 0;
+  const seenTypes = new Set();
+  let traceTimer = null;
+
+  function startEventTrace(seconds = 10) {
+    TRACE_ENABLED = true;
+    TRACE_END_AT = Date.now() + seconds * 1000;
+    seenTypes.clear();
+    if (traceTimer) clearInterval(traceTimer);
+    traceTimer = setInterval(() => {
+      if (Date.now() > TRACE_END_AT) {
+        TRACE_ENABLED = false;
+        clearInterval(traceTimer);
+        traceTimer = null;
+        console.log("🧪 OpenAI TRACE ended. Types seen:",
+          Array.from(seenTypes).sort());
+      }
+    }, 250);
+    console.log(`🧪 OpenAI TRACE started for ${seconds}s...`);
+  }
+
+  function traceEventOnce(msg) {
+    if (!TRACE_ENABLED || Date.now() > TRACE_END_AT) return;
+    const t = msg?.type || "(no type)";
+    if (seenTypes.has(t)) return;
+    seenTypes.add(t);
+    const keys = Object.keys(msg || {}).slice(0, 20);
+    console.log("🧪 OpenAI event type:", t, "| keys:", keys);
+    const asString = JSON.stringify(msg);
+    if (t.toLowerCase().includes("audio") ||
+        asString.includes('"audio"')) {
+      console.log("🧪 (audio-related) type:", t);
+    }
+  }
+
   function connectOpenAIRealtime(session, twilioWs) {
     return new Promise((resolve, reject) => {
       let settledConnect = false;
@@ -650,8 +686,11 @@ wss.on("connection", (ws) => {
           return;
         }
 
+        traceEventOnce(msg);
+
         if (msg.type === "session.updated") {
           console.log("✅ session.updated received", msg.session?.turn_detection);
+          startEventTrace(15);
           if (!session.didWelcome) {
             session.didWelcome = true;
             session.allowAudio = true;
