@@ -507,6 +507,8 @@ wss.on("connection", (ws) => {
   let activeResponseLabel = "";
   let audioDeltaCount = 0;
   let forwardedDeltaCount = 0;
+  let pendingText = "";
+  let pendingTimer = null;
 
   const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 1000);
   const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 1000);
@@ -795,7 +797,7 @@ wss.on("connection", (ws) => {
           session.openAiWs.send(JSON.stringify({
             type: "input_audio_buffer.commit",
           }));
-          void handleFinalUserTranscript(twilioWs, session, transcript, playTextWithSttGuard, degradedFallback);
+          pushTranscriptChunk(transcript);
           console.log("➡️ envoi n8n:", transcript);
           return;
         }
@@ -922,6 +924,22 @@ wss.on("connection", (ws) => {
     allowAudio: false,
     didWelcome: false,
   };
+
+  function pushTranscriptChunk(chunk) {
+    const t = (chunk || "").trim();
+    if (!t) return;
+    pendingText = (pendingText ? (pendingText + " " + t) : t).trim();
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => {
+      const finalText = pendingText.trim();
+      pendingText = "";
+      pendingTimer = null;
+      const wc = finalText.split(/\s+/).filter(Boolean).length;
+      if (wc < 2) return;
+      console.log(`📝 transcript tour final buffer (${wc} mots)`);
+      void handleFinalUserTranscript(ws, session, finalText, playTextWithSttGuard, degradedFallback);
+    }, 800);
+  }
 
   ws.on("message", async (msg) => {
     let evt;
