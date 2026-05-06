@@ -564,7 +564,12 @@ wss.on("connection", (ws) => {
               voice: "marin",
               temperature: 0.6,
               max_output_tokens: 300,
-              instructions: `Lis EXACTEMENT le texte suivant, mot pour mot, sans rien ajouter.\nTEXTE:\n${text}`,
+              instructions: `CONSIGNE ABSOLUE : Lis uniquement le texte entre les balises <TEXTE>.
+Mot pour mot, sans rien ajouter, sans poser de question, sans reformuler.
+Arrête-toi dès que le texte est terminé.
+<TEXTE>
+${text}
+</TEXTE>`,
             },
           })
         );
