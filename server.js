@@ -561,15 +561,10 @@ wss.on("connection", (ws) => {
             type: "response.create",
             response: {
               modalities: ["audio", "text"],
-              voice: "marin",
               temperature: 0.6,
               max_output_tokens: 300,
-              instructions: `CONSIGNE ABSOLUE : Lis uniquement le texte entre les balises <TEXTE>.
-Mot pour mot, sans rien ajouter, sans poser de question, sans reformuler.
-Arrête-toi dès que le texte est terminé.
-<TEXTE>
-${text}
-</TEXTE>`,
+              instructions: "Tu es un lecteur TTS. Lis mot pour mot le texte fourni. N'ajoute rien.",
+              input_text: `"${text}"`,
             },
           })
         );
