@@ -175,7 +175,7 @@ function buildTwimlConnect(wsUrl) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${wsUrl}" track="inbound_track" />
+    <Stream url="${wsUrl}" track="both_tracks" />
   </Connect>
 </Response>`;
 }
