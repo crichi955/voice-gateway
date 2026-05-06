@@ -514,6 +514,10 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
 wss.on("connection", (ws) => {
   console.log("✅ Twilio WS connected");
 
+  let activeResponseId = null;
+  let activeResponseLabel = "";
+  let audioDeltaCount = 0;
+
   const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 1000);
   const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 1000);
 
@@ -547,7 +551,10 @@ wss.on("connection", (ws) => {
       }, 120_000);
       try {
         session.allowAudio = true;
-        console.log("🗣️ response.create (TTS) sending, allowAudio=", session.allowAudio);
+        activeResponseId = null;
+        audioDeltaCount = 0;
+        activeResponseLabel = "N8N_TTS";
+        console.log("🗣️ response.create sent label=", activeResponseLabel);
         oai.send(
           JSON.stringify({
             type: "response.create",
@@ -695,6 +702,10 @@ wss.on("connection", (ws) => {
             session.didWelcome = true;
             session.allowAudio = true;
             session._welcomeResponsePending = true;
+            activeResponseId = null;
+            audioDeltaCount = 0;
+            activeResponseLabel = "WELCOME";
+            console.log("🗣️ response.create sent label=", activeResponseLabel);
             session.openAiWs.send(
               JSON.stringify({
                 type: "response.create",
@@ -711,23 +722,50 @@ wss.on("connection", (ws) => {
         }
 
         if (msg.type === "response.created") {
-          session.openAiResponseInProgress = true;
+          const rid = msg.response?.id || msg.response_id;
+          if (rid) {
+            activeResponseId = rid;
+            console.log("🧷 activeResponseId set:", activeResponseId,
+              "label=", activeResponseLabel);
+          }
           return;
         }
 
         if (msg.type === "response.audio.delta") {
-          if (!session.allowAudio) return;
-          session._deltaCount = (session._deltaCount || 0) + 1;
-          if (session._deltaCount % 50 === 0) console.log("🔊 audio delta passing", session._deltaCount);
-          const deltaB64 = msg.delta;
-          if (deltaB64 && session.streamSid && twilioWs.readyState === WebSocket.OPEN) {
-            twilioWs.send(
-              JSON.stringify({
-                event: "media",
-                streamSid: session.streamSid,
-                media: { payload: deltaB64 },
-              })
-            );
+          if (!activeResponseId && (msg.response_id || msg.response?.id)) {
+            console.log("⚠️ audio.delta arrived but activeResponseId is null. incoming rid=",
+              msg.response_id || msg.response?.id);
+          }
+          const rid = msg.response_id || msg.response?.id;
+          if (!rid || rid !== activeResponseId) return;
+          const b64 = msg.delta;
+          audioDeltaCount++;
+          if (audioDeltaCount % 50 === 0) {
+            console.log("🔊 audio delta passing", audioDeltaCount,
+              "label=", activeResponseLabel);
+          }
+          if (b64 && session.streamSid &&
+              twilioWs.readyState === WebSocket.OPEN) {
+            twilioWs.send(JSON.stringify({
+              event: "media",
+              streamSid: session.streamSid,
+              media: { payload: b64 }
+            }));
+            if (audioDeltaCount % 50 === 0) {
+              console.log("📤 forwarded to Twilio", audioDeltaCount,
+                "bytes(b64)=", b64?.length || 0,
+                "label=", activeResponseLabel);
+            }
+          }
+          return;
+        }
+
+        if (msg.type === "response.audio.done") {
+          const rid = msg.response_id || msg.response?.id;
+          if (rid && rid === activeResponseId) {
+            console.log("✅ audio done", rid,
+              "deltas=", audioDeltaCount,
+              "label=", activeResponseLabel);
           }
           return;
         }
@@ -764,6 +802,13 @@ wss.on("connection", (ws) => {
         }
 
         if (msg.type === "response.done" || msg.type === "response.completed") {
+          const rid = msg.response?.id || msg.response_id;
+          if (rid && rid === activeResponseId) {
+            console.log("✅ response.done for", rid,
+              "label=", activeResponseLabel);
+            activeResponseId = null;
+            activeResponseLabel = "";
+          }
           const wasWelcome = session._welcomeResponsePending;
           session.allowAudio = false;
           session.openAiResponseInProgress = false;
