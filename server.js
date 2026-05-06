@@ -466,26 +466,13 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
     }
 
     if (action === "fallback") {
-      session.transcriptAttempts += 1;
-      if (session.transcriptAttempts < 3) {
-        console.log(
-          `ℹ️ Fallback n8n ignoré (tentative ${session.transcriptAttempts}/3, STT possiblement bruit/hallucination) — poursuite écoute`
-        );
-        session.sttPaused = false;
-        resetListeningBuffers(session);
-        return;
-      }
-
       session.responded = true;
       await playTextWithSttGuard(ws, session, textToSpeak);
-
-      // Notify doctor with patient metadata + transcript on FAQ fallback.
       await notifyDoctorDoubleChannel({
         patientName: session.patientName,
         patientNumber: session.fromNumber,
         transcript,
       });
-
       const to = toWhatsAppTo(session.fromNumber);
       if (to) {
         await sendWhatsApp({
@@ -495,6 +482,8 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
       } else {
         console.log("⚠️ WhatsApp not sent (missing recipient).");
       }
+      session.sttPaused = false;
+      resetListeningBuffers(session);
       return;
     }
 
@@ -883,7 +872,7 @@ wss.on("connection", (ws) => {
                 voice: "marin",
                 input_audio_format: "g711_ulaw",
                 output_audio_format: "g711_ulaw",
-                input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+                input_audio_transcription: { model: "gpt-4o-mini-transcribe", language: "fr" },
                 turn_detection: null,
                 tool_choice: "auto",
               },
