@@ -788,7 +788,7 @@ wss.on("connection", (ws) => {
           const transcript = (msg.transcript || "").trim();
           console.log("📝 transcript reçu:", transcript);
           const wc = transcript.trim().split(/\s+/).filter(Boolean).length;
-          if (wc < 3) return;
+          if (wc < 2) return;
           if (!getValidN8nBrainUrl()) return;
           if (!session.streamSid) return;
           if (session.sttPaused || session.responded) return;
