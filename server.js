@@ -517,6 +517,7 @@ wss.on("connection", (ws) => {
   let activeResponseId = null;
   let activeResponseLabel = "";
   let audioDeltaCount = 0;
+  let forwardedDeltaCount = 0;
 
   const POST_WELCOME_LISTEN_DELAY_MS = Number(process.env.POST_WELCOME_LISTEN_DELAY_MS || 1000);
   const TTS_POST_PLAY_MS = Number(process.env.TTS_POST_PLAY_MS || 1000);
@@ -751,6 +752,12 @@ wss.on("connection", (ws) => {
               streamSid: session.streamSid,
               media: { payload: b64 }
             }));
+            forwardedDeltaCount++;
+            if (audioDeltaCount <= 5) {
+              console.log("📤 forwarded sample", audioDeltaCount,
+                "b64len=", b64?.length || 0,
+                "label=", activeResponseLabel);
+            }
             if (audioDeltaCount % 50 === 0) {
               console.log("📤 forwarded to Twilio", audioDeltaCount,
                 "bytes(b64)=", b64?.length || 0,
@@ -763,9 +770,15 @@ wss.on("connection", (ws) => {
         if (msg.type === "response.audio.done") {
           const rid = msg.response_id || msg.response?.id;
           if (rid && rid === activeResponseId) {
-            console.log("✅ audio done", rid,
-              "deltas=", audioDeltaCount,
-              "label=", activeResponseLabel);
+            console.log(
+              "✅ audio done", rid,
+              "deltas_in=", audioDeltaCount,
+              "deltas_forwarded=", forwardedDeltaCount,
+              "twilioState=", twilioWs.readyState,
+              "streamSid=", session.streamSid,
+              "label=", activeResponseLabel
+            );
+            forwardedDeltaCount = 0;
           }
           return;
         }
