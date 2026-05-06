@@ -552,22 +552,32 @@ wss.on("connection", (ws) => {
       }, 120_000);
       try {
         session.allowAudio = true;
+        // Étape 1 — injecter le texte
+        oai.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: text }]
+          }
+        }));
+
+        // Étape 2 — garder les resets existants puis response.create
         activeResponseId = null;
         audioDeltaCount = 0;
+        forwardedDeltaCount = 0;
         activeResponseLabel = "N8N_TTS";
         console.log("🗣️ response.create sent label=", activeResponseLabel);
-        oai.send(
-          JSON.stringify({
-            type: "response.create",
-            response: {
-              modalities: ["audio", "text"],
-              temperature: 0.6,
-              max_output_tokens: 300,
-              instructions: "Tu es un lecteur TTS. Lis mot pour mot le texte fourni. N'ajoute rien.",
-              input_text: `"${text}"`,
-            },
-          })
-        );
+
+        oai.send(JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            temperature: 0.6,
+            max_output_tokens: 300,
+            instructions: "Tu es un lecteur TTS. Lis mot pour mot le dernier message utilisateur. N'ajoute rien. Ne pose aucune question."
+          }
+        }));
       } catch (e) {
         session.allowAudio = false;
         finish(() => reject(e));
