@@ -563,8 +563,8 @@ wss.on("connection", (ws) => {
               modalities: ["audio", "text"],
               voice: "marin",
               temperature: 0.6,
-              max_output_tokens: 80,
-              instructions: `Lis EXACTEMENT le texte entre <say> et </say>, sans rien ajouter ni reformuler. <say>${text}</say>`,
+              max_output_tokens: 300,
+              instructions: `Lis EXACTEMENT le texte suivant, mot pour mot, sans rien ajouter.\nTEXTE:\n${text}`,
             },
           })
         );
