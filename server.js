@@ -468,17 +468,17 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
     if (action === "fallback") {
       session.responded = true;
       await playTextWithSttGuard(ws, session, textToSpeak);
-      await notifyDoctorDoubleChannel({
-        patientName: session.patientName,
-        patientNumber: session.fromNumber,
-        transcript,
-      });
+      // await notifyDoctorDoubleChannel({
+      //   patientName: session.patientName,
+      //   patientNumber: session.fromNumber,
+      //   transcript,
+      // });
       const to = toWhatsAppTo(session.fromNumber);
       if (to) {
-        await sendWhatsApp({
-          to,
-          body: "Votre question a été transmise au médecin. Il vous recontactera rapidement. En cas d'urgence, appelez le 15 ou le 112.",
-        });
+        // await sendWhatsApp({
+        //   to,
+        //   body: "Votre question a été transmise au médecin. Il vous recontactera rapidement. En cas d'urgence, appelez le 15 ou le 112.",
+        // });
       } else {
         console.log("⚠️ WhatsApp not sent (missing recipient).");
       }
@@ -1038,10 +1038,16 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    // STOP
     if (evt.event === "stop") {
       console.log("⏹️ stop", evt.stop);
       console.log(`✅ total media packets: ${session.mediaCount}`);
+
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+      }
+      pendingText = "";
+
       if (session.openAiWs) {
         try {
           session.openAiWs.close();
