@@ -794,11 +794,9 @@ wss.on("connection", (ws) => {
           if (!session.streamSid) return;
           if (session.sttPaused || session.responded) return;
           if (session.listenReadyAt == null || Date.now() < session.listenReadyAt) return;
-          session.openAiWs.send(JSON.stringify({
-            type: "input_audio_buffer.commit",
-          }));
+          if (session.lastTranscript === transcript) return;
+          session.lastTranscript = transcript;
           pushTranscriptChunk(transcript);
-          console.log("➡️ envoi n8n:", transcript);
           return;
         }
 
