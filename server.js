@@ -936,7 +936,7 @@ wss.on("connection", (ws) => {
       if (wc < 2) return;
       console.log(`📝 transcript tour final buffer (${wc} mots)`);
       void handleFinalUserTranscript(ws, session, finalText, playTextWithSttGuard, degradedFallback);
-    }, 800);
+    }, 1200);
   }
 
   ws.on("message", async (msg) => {
