@@ -924,10 +924,31 @@ wss.on("connection", (ws) => {
   };
 
   function pushTranscriptChunk(chunk) {
-    const t = (chunk || "").trim();
-    if (!t) return;
-    pendingText = (pendingText ? (pendingText + " " + t) : t).trim();
+    const chunkText = (chunk || "").trim();
+    if (!chunkText) return;
+
+    if (pendingText) pendingText += " ";
+    pendingText += chunkText;
+
     if (pendingTimer) clearTimeout(pendingTimer);
+
+    const text = (pendingText || "").trim();
+    const words = text ? text.split(/\s+/).length : 0;
+
+    let delayMs = 1600;
+
+    const endsWithEllipsis = text.endsWith("...");
+    const endsWithNonTerminalPunct = /[,;:-]$/.test(text);
+    const startsLikeQuestion =
+      /^(est-ce que|est ce que|je voudrais|j'aimerais|j'ai|j’ai|bonjour)\b/i.test(text);
+    const endsWithTerminalPunct = /[.?!…]$/.test(text);
+
+    const looksIncomplete =
+      !endsWithTerminalPunct &&
+      (endsWithEllipsis || endsWithNonTerminalPunct || (startsLikeQuestion && words < 9));
+
+    if (looksIncomplete) delayMs = 2000;
+
     pendingTimer = setTimeout(() => {
       const finalText = pendingText.trim();
       pendingText = "";
@@ -936,7 +957,7 @@ wss.on("connection", (ws) => {
       if (wc < 2) return;
       console.log(`📝 transcript tour final buffer (${wc} mots)`);
       void handleFinalUserTranscript(ws, session, finalText, playTextWithSttGuard, degradedFallback);
-    }, 1200);
+    }, delayMs);
   }
 
   ws.on("message", async (msg) => {
