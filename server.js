@@ -671,7 +671,7 @@ wss.on("connection", (ws) => {
     }
   }
 
-  const OPENAI_G711_ULAW_FORMAT = { type: "audio/G711-ulaw", rate: 8000 };
+  const OPENAI_PCMU_FORMAT = { type: "audio/pcmu", rate: 8000 };
 
   /** Payload `session` pour `session.update` (API Realtime GA). */
   function buildOpenAiRealtimeGaSession(instructions) {
@@ -681,12 +681,12 @@ wss.on("connection", (ws) => {
       instructions,
       audio: {
         input: {
-          format: OPENAI_G711_ULAW_FORMAT,
+          format: OPENAI_PCMU_FORMAT,
           turn_detection: null,
           transcription: { model: "gpt-4o-mini-transcribe", language: "fr" },
         },
         output: {
-          format: OPENAI_G711_ULAW_FORMAT,
+          format: OPENAI_PCMU_FORMAT,
           voice: "marin",
         },
       },
