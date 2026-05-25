@@ -671,6 +671,29 @@ wss.on("connection", (ws) => {
     }
   }
 
+  const OPENAI_G711_ULAW_FORMAT = { type: "audio/G711-ulaw", rate: 8000 };
+
+  /** Payload `session` pour `session.update` (API Realtime GA). */
+  function buildOpenAiRealtimeGaSession(instructions) {
+    return {
+      type: "realtime",
+      output_modalities: ["audio"],
+      instructions,
+      audio: {
+        input: {
+          format: OPENAI_G711_ULAW_FORMAT,
+          turn_detection: null,
+          transcription: { model: "gpt-4o-mini-transcribe", language: "fr" },
+        },
+        output: {
+          format: OPENAI_G711_ULAW_FORMAT,
+          voice: "marin",
+        },
+      },
+      tool_choice: "auto",
+    };
+  }
+
   function connectOpenAIRealtime(session, twilioWs) {
     return new Promise((resolve, reject) => {
       let settledConnect = false;
@@ -858,30 +881,20 @@ wss.on("connection", (ws) => {
         session.openAiWs = oaiWs;
 
         try {
+          const gaSession = buildOpenAiRealtimeGaSession(
+            "Tu es un serveur TTS. Tu ne dois JAMAIS improviser, reformuler, ajouter des mots, ni poser de questions. Quand l'application te fournit un texte à dire, tu dois le lire EXACTEMENT à l'identique puis t'arrêter. Si le texte est incomplet (ex: '...'), lis uniquement ce qui est fourni puis stop. N'ajoute jamais de ponctuation ou de salutations supplémentaires."
+          );
           oaiWs.send(
             JSON.stringify({
               type: "session.update",
-              session: {
-                type: "realtime",
-                output_modalities: ["audio"],
-                instructions:
-                  "Tu es un serveur TTS. Tu ne dois JAMAIS improviser, reformuler, ajouter des mots, ni poser de questions. Quand l'application te fournit un texte à dire, tu dois le lire EXACTEMENT à l'identique puis t'arrêter. Si le texte est incomplet (ex: '...'), lis uniquement ce qui est fourni puis stop. N'ajoute jamais de ponctuation ou de salutations supplémentaires.",
-                audio: {
-                  input: {
-                    format: { type: "audio/G711-ulaw", rate: 8000 },
-                    turn_detection: null,
-                    transcription: { model: "gpt-4o-mini-transcribe", language: "fr" },
-                  },
-                  output: {
-                    format: { type: "audio/G711-ulaw", rate: 8000 },
-                    voice: "marin",
-                  },
-                },
-                tool_choice: "auto",
-              },
+              session: gaSession,
             })
           );
-          console.log("✅ session.update sent (GA, turn_detection=null, manual responses only)");
+          console.log(
+            "✅ session.update sent (GA)",
+            "session.type=", gaSession.type,
+            "turn_detection=", gaSession.audio?.input?.turn_detection
+          );
         } catch (e) {
           if (!settledConnect) {
             settledConnect = true;
