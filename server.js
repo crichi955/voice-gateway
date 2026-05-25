@@ -563,9 +563,7 @@ wss.on("connection", (ws) => {
         oai.send(JSON.stringify({
           type: "response.create",
           response: {
-            modalities: ["audio", "text"],
-            temperature: 0.6,
-            max_output_tokens: 300,
+            output_modalities: ["audio"],
             instructions: "Tu es un lecteur TTS. Lis mot pour mot le dernier message utilisateur. N'ajoute rien. Ne pose aucune question."
           }
         }));
@@ -697,7 +695,7 @@ wss.on("connection", (ws) => {
         traceEventOnce(msg);
 
         if (msg.type === "session.updated") {
-          console.log("✅ session.updated received", msg.session?.turn_detection);
+          console.log("✅ session.updated received", msg.session?.audio?.input?.turn_detection);
           if (process.env.OAI_TRACE === "true") startEventTrace(15);
           if (!session.didWelcome) {
             session.didWelcome = true;
@@ -711,8 +709,7 @@ wss.on("connection", (ws) => {
               JSON.stringify({
                 type: "response.create",
                 response: {
-                  modalities: ["audio", "text"],
-                  voice: "marin",
+                  output_modalities: ["audio"],
                   instructions:
                     "Dis exactement : Cabinet du Dr Crichi, bonjour. En cas d'urgence médicale, appelez le 15 immédiatement. Comment puis-je vous aider ?",
                 },
@@ -732,7 +729,7 @@ wss.on("connection", (ws) => {
           return;
         }
 
-        if (msg.type === "response.audio.delta") {
+        if (msg.type === "response.output_audio.delta") {
           if (!activeResponseId && (msg.response_id || msg.response?.id)) {
             console.log("⚠️ audio.delta arrived but activeResponseId is null. incoming rid=",
               msg.response_id || msg.response?.id);
@@ -767,7 +764,7 @@ wss.on("connection", (ws) => {
           return;
         }
 
-        if (msg.type === "response.audio.done") {
+        if (msg.type === "response.output_audio.done") {
           const rid = msg.response_id || msg.response?.id;
           if (rid && rid === activeResponseId) {
             console.log(
@@ -812,7 +809,7 @@ wss.on("connection", (ws) => {
           return;
         }
 
-        if (msg.type === "response.done" || msg.type === "response.completed") {
+        if (msg.type === "response.done") {
           const rid = msg.response?.id || msg.response_id;
           if (rid && rid === activeResponseId) {
             console.log("✅ response.done for", rid,
@@ -865,19 +862,26 @@ wss.on("connection", (ws) => {
             JSON.stringify({
               type: "session.update",
               session: {
-                modalities: ["audio", "text"],
+                type: "realtime",
+                output_modalities: ["audio"],
                 instructions:
                   "Tu es un serveur TTS. Tu ne dois JAMAIS improviser, reformuler, ajouter des mots, ni poser de questions. Quand l'application te fournit un texte à dire, tu dois le lire EXACTEMENT à l'identique puis t'arrêter. Si le texte est incomplet (ex: '...'), lis uniquement ce qui est fourni puis stop. N'ajoute jamais de ponctuation ou de salutations supplémentaires.",
-                voice: "marin",
-                input_audio_format: "g711_ulaw",
-                output_audio_format: "g711_ulaw",
-                input_audio_transcription: { model: "gpt-4o-mini-transcribe", language: "fr" },
-                turn_detection: null,
+                audio: {
+                  input: {
+                    format: { type: "audio/G711-ulaw", rate: 8000 },
+                    turn_detection: null,
+                    transcription: { model: "gpt-4o-mini-transcribe", language: "fr" },
+                  },
+                  output: {
+                    format: { type: "audio/G711-ulaw", rate: 8000 },
+                    voice: "marin",
+                  },
+                },
                 tool_choice: "auto",
               },
             })
           );
-          console.log("✅ session.update sent (turn_detection=null, manual responses only)");
+          console.log("✅ session.update sent (GA, turn_detection=null, manual responses only)");
         } catch (e) {
           if (!settledConnect) {
             settledConnect = true;
