@@ -682,7 +682,6 @@ wss.on("connection", (ws) => {
       const oaiWs = new WebSocket(url, {
         headers: {
           Authorization: `Bearer ${apiKey}`,
-          "OpenAI-Beta": "realtime=v1",
         },
       });
 
