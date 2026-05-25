@@ -671,7 +671,7 @@ wss.on("connection", (ws) => {
     }
   }
 
-  const OPENAI_PCMU_FORMAT = { type: "audio/pcmu", rate: 8000 };
+  const OPENAI_PCMU_FORMAT = { type: "audio/pcmu" };
 
   /** Payload `session` pour `session.update` (API Realtime GA). */
   function buildOpenAiRealtimeGaSession(instructions) {
