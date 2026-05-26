@@ -734,7 +734,7 @@ wss.on("connection", (ws) => {
                 response: {
                   output_modalities: ["audio"],
                   instructions:
-                    "Dis exactement : Cabinet du Dr Crichi, bonjour. En cas d'urgence médicale, appelez le 15 immédiatement. Comment puis-je vous aider ?",
+                    "Dis exactement : Bonjour, cabinet du docteur Crichi. En cas d'urgence médicale, appelez le 15 immédiatement. Comment puis-je vous aider ?",
                 },
               })
             );
