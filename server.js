@@ -378,7 +378,7 @@ async function callN8nForTurn({ transcript, session }) {
 /**
  * Traite une transcription finale de tour (AssemblyAI `Turn` avec `end_of_turn`).
  */
-async function handleFinalUserTranscript(ws, session, transcript, playTextWithSttGuard, degradedFallback) {
+async function handleFinalUserTranscript(ws, session, transcript, playTextWithSttGuard, degradedFallback, playTextOpenAIRealtime) {
   if (session.n8nInFlight || session.responded) return;
   session.n8nInFlight = true;
 
@@ -425,6 +425,7 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
       console.log(`🐛 DEBUG_TRANSCRIPT: ${wordCount} mots | texte capté:`, transcript);
     }
     console.log("🧠 Will call n8n now | transcript =", transcript);
+    void playTextOpenAIRealtime(ws, session, "Un instant...");
     const brainJson = await callN8nForTurn({ transcript, session });
     const action = brainJson?.action;
     const textToSpeak = brainJson?.text;
@@ -951,7 +952,7 @@ wss.on("connection", (ws) => {
     const text = (pendingText || "").trim();
     const words = text ? text.split(/\s+/).length : 0;
 
-    let delayMs = 1600;
+    let delayMs = 1000;
 
     const endsWithEllipsis = text.endsWith("...");
     const endsWithNonTerminalPunct = /[,;:-]$/.test(text);
@@ -963,7 +964,7 @@ wss.on("connection", (ws) => {
       !endsWithTerminalPunct &&
       (endsWithEllipsis || endsWithNonTerminalPunct || (startsLikeQuestion && words < 9));
 
-    if (looksIncomplete) delayMs = 2000;
+    if (looksIncomplete) delayMs = 1400;
 
     pendingTimer = setTimeout(() => {
       const finalText = pendingText.trim();
@@ -972,7 +973,7 @@ wss.on("connection", (ws) => {
       const wc = finalText.split(/\s+/).filter(Boolean).length;
       if (wc < 2) return;
       console.log(`📝 transcript tour final buffer (${wc} mots)`);
-      void handleFinalUserTranscript(ws, session, finalText, playTextWithSttGuard, degradedFallback);
+      void handleFinalUserTranscript(ws, session, finalText, playTextWithSttGuard, degradedFallback, playTextOpenAIRealtime);
     }, delayMs);
   }
 
