@@ -152,12 +152,24 @@ function buildAzureSsml(text) {
  * @returns {Promise<{ audio: Buffer, firstByteTs: number }>}
  */
 async function synthesizeAzureTts(text) {
+  const tStart = Date.now();
+  const textPreview = text.length > 100 ? `${text.slice(0, 100)}…` : text;
+  console.log(
+    `🔷 Azure TTS synthesize START | chars=${text.length} | region=${AZURE_SPEECH_REGION} | timeout=${AZURE_TTS_FIRST_BYTE_TIMEOUT_MS}ms | preview="${textPreview}"`
+  );
+
   if (!AZURE_SPEECH_KEY || !AZURE_SPEECH_REGION) {
+    console.log("❌ Azure TTS synthesize: AZURE_SPEECH_KEY / AZURE_SPEECH_REGION missing");
     throw new Error("AZURE_SPEECH_KEY / AZURE_SPEECH_REGION missing");
   }
   const url = `https://${AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), AZURE_TTS_FIRST_BYTE_TIMEOUT_MS);
+  const timer = setTimeout(() => {
+    console.log(
+      `⚠️ Azure TTS synthesize: abort (premier byte > ${AZURE_TTS_FIRST_BYTE_TIMEOUT_MS}ms, elapsed=${Date.now() - tStart}ms)`
+    );
+    controller.abort();
+  }, AZURE_TTS_FIRST_BYTE_TIMEOUT_MS);
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -170,25 +182,55 @@ async function synthesizeAzureTts(text) {
       body: buildAzureSsml(text),
       signal: controller.signal,
     });
+    console.log(
+      `🔷 Azure TTS HTTP response | status=${resp.status} ${resp.statusText} | content-type=${resp.headers.get("content-type") ?? "n/a"} | content-length=${resp.headers.get("content-length") ?? "n/a"} | fetchMs=${Date.now() - tStart}`
+    );
     if (!resp.ok) {
       const txt = await resp.text().catch(() => "");
+      console.log(`❌ Azure TTS HTTP error body: ${txt.slice(0, 500)}`);
       throw new Error(`Azure TTS HTTP ${resp.status} ${resp.statusText} ${txt.slice(0, 200)}`);
+    }
+    if (!resp.body) {
+      console.log("❌ Azure TTS: response body is null (stream absent)");
+      throw new Error("Azure TTS response body is null");
     }
     const chunks = [];
     let firstByteTs = null;
+    let chunkIndex = 0;
+    let totalBytes = 0;
     for await (const chunk of resp.body) {
+      chunkIndex += 1;
+      const buf = Buffer.from(chunk);
+      totalBytes += buf.length;
       if (firstByteTs === null) {
         firstByteTs = Date.now();
-        // Premier byte arrivé dans les temps : on désarme le timeout,
-        // la suite du téléchargement n'est plus soumise à la limite.
+        console.log(
+          `🔷 Azure TTS premier byte | chunk=#${chunkIndex} bytes=${buf.length} | firstByteMs=${firstByteTs - tStart}`
+        );
         clearTimeout(timer);
       }
-      chunks.push(Buffer.from(chunk));
+      if (chunkIndex <= 3 || chunkIndex % 20 === 0) {
+        console.log(
+          `🔷 Azure TTS chunk #${chunkIndex} | bytes=${buf.length} | totalSoFar=${totalBytes} | elapsedMs=${Date.now() - tStart}`
+        );
+      }
+      chunks.push(buf);
     }
     const audio = Buffer.concat(chunks);
-    if (!audio.length) throw new Error("Azure TTS returned empty audio");
+    const durationMs = Math.ceil(audio.length / 8);
+    console.log(
+      `🔷 Azure TTS synthesize DONE | chunks=${chunkIndex} | totalBytes=${audio.length} | ~audioDurationMs=${durationMs} | firstByteMs=${firstByteTs != null ? firstByteTs - tStart : "n/a"} | totalMs=${Date.now() - tStart}`
+    );
+    if (!audio.length) {
+      console.log("❌ Azure TTS: stream terminé mais audio vide");
+      throw new Error("Azure TTS returned empty audio");
+    }
     return { audio, firstByteTs };
   } catch (err) {
+    console.log(
+      `❌ Azure TTS synthesize ERROR | name=${err?.name ?? "n/a"} | message=${err?.message ?? err} | elapsedMs=${Date.now() - tStart}`
+    );
+    if (err?.stack) console.log(`❌ Azure TTS synthesize stack: ${err.stack}`);
     if (err?.name === "AbortError") {
       throw new Error(`Azure TTS timeout (premier byte > ${AZURE_TTS_FIRST_BYTE_TIMEOUT_MS}ms)`);
     }
@@ -204,11 +246,30 @@ async function synthesizeAzureTts(text) {
  * de `response.done` sur le chemin OpenAI, pour que le garde STT reste actif.
  */
 async function playTextAzureTts(twilioWs, session, text) {
+  const t0 = Date.now();
+  const textPreview = text.length > 100 ? `${text.slice(0, 100)}…` : text;
+  console.log(
+    `🔷 Azure TTS play START | streamSid=${session.streamSid ?? "n/a"} | wsState=${twilioWs.readyState} | chars=${text.length} | preview="${textPreview}"`
+  );
+
   if (!session.streamSid || twilioWs.readyState !== WebSocket.OPEN) {
+    console.log(
+      `❌ Azure TTS play: Twilio WS not ready | streamSid=${session.streamSid ?? "n/a"} | wsState=${twilioWs.readyState}`
+    );
     throw new Error("Twilio WS not ready for Azure TTS playback");
   }
-  const t0 = Date.now();
-  const { audio, firstByteTs } = await synthesizeAzureTts(text);
+
+  let audio;
+  let firstByteTs;
+  try {
+    ({ audio, firstByteTs } = await synthesizeAzureTts(text));
+    console.log(
+      `🔷 Azure TTS play: synthèse OK | audioBytes=${audio.length} | synthMs=${Date.now() - t0}`
+    );
+  } catch (err) {
+    console.log(`❌ Azure TTS play: synthèse échouée | message=${err?.message ?? err}`);
+    throw err;
+  }
 
   if (session.lastSpeechEndTs) {
     console.log(
@@ -219,20 +280,56 @@ async function playTextAzureTts(twilioWs, session, text) {
   }
 
   const FRAME_BYTES = 640; // 80 ms de μ-law 8kHz par message Twilio
+  const totalFrames = Math.ceil(audio.length / FRAME_BYTES);
+  let framesSent = 0;
+  let bytesSent = 0;
+
   for (let i = 0; i < audio.length; i += FRAME_BYTES) {
-    if (twilioWs.readyState !== WebSocket.OPEN) break;
-    twilioWs.send(
-      JSON.stringify({
-        event: "media",
-        streamSid: session.streamSid,
-        media: { payload: audio.subarray(i, i + FRAME_BYTES).toString("base64") },
-      })
+    if (twilioWs.readyState !== WebSocket.OPEN) {
+      console.log(
+        `⚠️ Azure TTS play ABORT: Twilio WS fermé | framesSent=${framesSent}/${totalFrames} | bytesSent=${bytesSent}/${audio.length} | wsState=${twilioWs.readyState}`
+      );
+      break;
+    }
+    const frame = audio.subarray(i, i + FRAME_BYTES);
+    try {
+      twilioWs.send(
+        JSON.stringify({
+          event: "media",
+          streamSid: session.streamSid,
+          media: { payload: frame.toString("base64") },
+        })
+      );
+      framesSent += 1;
+      bytesSent += frame.length;
+      if (framesSent === 1 || framesSent % 25 === 0 || framesSent === totalFrames) {
+        console.log(
+          `🔷 Azure TTS frame #${framesSent}/${totalFrames} | frameBytes=${frame.length} | bytesSent=${bytesSent}/${audio.length}`
+        );
+      }
+    } catch (sendErr) {
+      console.log(
+        `❌ Azure TTS play: erreur envoi frame #${framesSent + 1} | message=${sendErr?.message ?? sendErr}`
+      );
+      throw sendErr;
+    }
+  }
+
+  const durationMs = Math.ceil(audio.length / 8);
+  const playbackComplete = bytesSent >= audio.length;
+  console.log(
+    `🔊 Azure TTS play: envoi Twilio terminé | framesSent=${framesSent}/${totalFrames} | bytesSent=${bytesSent}/${audio.length} | complete=${playbackComplete} | ~durationMs=${durationMs} | totalMs=${Date.now() - t0}`
+  );
+
+  if (!playbackComplete) {
+    console.log(
+      `⚠️ Azure TTS play: lecture incomplète — ${audio.length - bytesSent} bytes non envoyés à Twilio`
     );
   }
-  const durationMs = Math.ceil(audio.length / 8);
-  console.log(`🔊 Azure TTS: ${audio.length} bytes envoyés à Twilio (~${durationMs}ms de lecture)`);
 
+  console.log(`🔷 Azure TTS play: attente fin lecture (~${durationMs}ms)`);
   await sleep(durationMs);
+  console.log(`🔷 Azure TTS play DONE | totalMs=${Date.now() - t0}`);
 }
 
 function resetListeningBuffers(session) {
