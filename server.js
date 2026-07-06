@@ -93,11 +93,22 @@ const AZURE_TTS_STYLE = "cheerful";
 /** Délai max (ms) avant réception du premier byte audio Azure ; au-delà, fallback automatique sur OpenAI. */
 const AZURE_TTS_FIRST_BYTE_TIMEOUT_MS = 1200;
 
+const WELCOME_TEXT =
+  String(process.env.WELCOME_TEXT || "").trim() ||
+  "Bonjour, cabinet du docteur Crichi. En cas d'urgence médicale, appelez le 15 immédiatement. Comment puis-je vous aider ?";
+
 if (TTS_PROVIDER === "azure" && (!AZURE_SPEECH_KEY || !AZURE_SPEECH_REGION)) {
   console.log(
     "⚠️ TTS_PROVIDER=azure mais AZURE_SPEECH_KEY / AZURE_SPEECH_REGION manquants — fallback OpenAI systématique."
   );
 }
+
+console.log(
+  `🔊 TTS config at startup | TTS_PROVIDER=${TTS_PROVIDER}` +
+    (TTS_PROVIDER === "azure"
+      ? ` | azureVoice=${AZURE_TTS_VOICE} | azureStyle=${AZURE_TTS_STYLE} | region=${AZURE_SPEECH_REGION || "MISSING"} | key=${AZURE_SPEECH_KEY ? "set" : "MISSING"}`
+      : " | provider=openai-realtime | voice=marin")
+);
 
 /** Fragments souvent hallucinés (FR) — comparaison en minuscules. */
 const STT_HALLUCINATION_HINTS_FR = [
@@ -125,6 +136,16 @@ if (KILL_SWITCH_ENABLED) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Réinitialise les flags session après lecture du message d'accueil. */
+function afterWelcomePlayback(session) {
+  session.allowAudio = false;
+  session._welcomeResponsePending = false;
+  void (async () => {
+    await sleep(800);
+    session.sttPaused = false;
+  })();
 }
 
 function escapeXml(text) {
@@ -964,17 +985,32 @@ wss.on("connection", (ws) => {
             activeResponseId = null;
             audioDeltaCount = 0;
             activeResponseLabel = "WELCOME";
-            console.log("🗣️ response.create sent label=", activeResponseLabel);
-            session.openAiWs.send(
-              JSON.stringify({
-                type: "response.create",
-                response: {
-                  output_modalities: ["audio"],
-                  instructions:
-                    "Dis exactement : Bonjour, cabinet du docteur Crichi. En cas d'urgence médicale, appelez le 15 immédiatement. Comment puis-je vous aider ?",
-                },
-              })
-            );
+
+            if (TTS_PROVIDER === "azure") {
+              console.log("🗣️ WELCOME via playText (Azure TTS) | text=", WELCOME_TEXT);
+              void (async () => {
+                try {
+                  await playText(twilioWs, session, WELCOME_TEXT);
+                } catch (err) {
+                  console.log("❌ WELCOME playText error:", err?.message || err);
+                } finally {
+                  afterWelcomePlayback(session);
+                  activeResponseLabel = "";
+                  console.log("✅ WELCOME finished (Azure/playText path)");
+                }
+              })();
+            } else {
+              console.log("🗣️ response.create sent label=", activeResponseLabel);
+              session.openAiWs.send(
+                JSON.stringify({
+                  type: "response.create",
+                  response: {
+                    output_modalities: ["audio"],
+                    instructions: `Dis exactement : ${WELCOME_TEXT}`,
+                  },
+                })
+              );
+            }
           }
           return;
         }
@@ -1087,15 +1123,13 @@ wss.on("connection", (ws) => {
             activeResponseLabel = "";
           }
           const wasWelcome = session._welcomeResponsePending;
-          session.allowAudio = false;
           session.openAiResponseInProgress = false;
-          session._welcomeResponsePending = false;
           console.log("✅ response finished -> flags reset", msg.type);
           if (wasWelcome) {
-            void (async () => {
-              await sleep(800);
-              session.sttPaused = false;
-            })();
+            afterWelcomePlayback(session);
+          } else {
+            session.allowAudio = false;
+            session._welcomeResponsePending = false;
           }
           const p = session._playDonePending;
           session._playDonePending = null;
