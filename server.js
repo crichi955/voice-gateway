@@ -84,6 +84,21 @@ app.get("/debug-ulaw", async (req, res) => {
 /** Nombre minimum de mots (tour transcription OpenAI Realtime) avant envoi à n8n — défaut 2. */
 const STT_MIN_WORDS_FOR_N8N = Math.max(1, Math.floor(Number(process.env.STT_MIN_WORDS_FOR_N8N ?? 2)) || 2);
 
+/** Provider TTS pour les réponses n8n : "openai" (défaut, comportement actuel) ou "azure" (Azure Neural TTS). */
+const TTS_PROVIDER = String(process.env.TTS_PROVIDER || "openai").trim().toLowerCase();
+const AZURE_SPEECH_KEY = String(process.env.AZURE_SPEECH_KEY || "").trim();
+const AZURE_SPEECH_REGION = String(process.env.AZURE_SPEECH_REGION || "").trim();
+const AZURE_TTS_VOICE = "fr-FR-DeniseNeural";
+const AZURE_TTS_STYLE = "cheerful";
+/** Délai max (ms) avant réception du premier byte audio Azure ; au-delà, fallback automatique sur OpenAI. */
+const AZURE_TTS_FIRST_BYTE_TIMEOUT_MS = 1200;
+
+if (TTS_PROVIDER === "azure" && (!AZURE_SPEECH_KEY || !AZURE_SPEECH_REGION)) {
+  console.log(
+    "⚠️ TTS_PROVIDER=azure mais AZURE_SPEECH_KEY / AZURE_SPEECH_REGION manquants — fallback OpenAI systématique."
+  );
+}
+
 /** Fragments souvent hallucinés (FR) — comparaison en minuscules. */
 const STT_HALLUCINATION_HINTS_FR = [
   "sous-titres",
@@ -110,6 +125,114 @@ if (KILL_SWITCH_ENABLED) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function escapeXml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function buildAzureSsml(text) {
+  return (
+    `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" ` +
+    `xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="fr-FR">` +
+    `<voice name="${AZURE_TTS_VOICE}">` +
+    `<mstts:express-as style="${AZURE_TTS_STYLE}">${escapeXml(text)}</mstts:express-as>` +
+    `</voice></speak>`
+  );
+}
+
+/**
+ * Synthétise `text` via Azure Neural TTS en μ-law 8kHz mono (format natif Twilio Media Streams).
+ * Rejette si le premier byte audio n'arrive pas avant `AZURE_TTS_FIRST_BYTE_TIMEOUT_MS`.
+ * @returns {Promise<{ audio: Buffer, firstByteTs: number }>}
+ */
+async function synthesizeAzureTts(text) {
+  if (!AZURE_SPEECH_KEY || !AZURE_SPEECH_REGION) {
+    throw new Error("AZURE_SPEECH_KEY / AZURE_SPEECH_REGION missing");
+  }
+  const url = `https://${AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AZURE_TTS_FIRST_BYTE_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
+        "Content-Type": "application/ssml+xml",
+        "X-Microsoft-OutputFormat": "raw-8khz-8bit-mono-mulaw",
+        "User-Agent": "voice-gateway",
+      },
+      body: buildAzureSsml(text),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => "");
+      throw new Error(`Azure TTS HTTP ${resp.status} ${resp.statusText} ${txt.slice(0, 200)}`);
+    }
+    const chunks = [];
+    let firstByteTs = null;
+    for await (const chunk of resp.body) {
+      if (firstByteTs === null) {
+        firstByteTs = Date.now();
+        // Premier byte arrivé dans les temps : on désarme le timeout,
+        // la suite du téléchargement n'est plus soumise à la limite.
+        clearTimeout(timer);
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+    const audio = Buffer.concat(chunks);
+    if (!audio.length) throw new Error("Azure TTS returned empty audio");
+    return { audio, firstByteTs };
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error(`Azure TTS timeout (premier byte > ${AZURE_TTS_FIRST_BYTE_TIMEOUT_MS}ms)`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Joue `text` via Azure TTS : synthèse, envoi de l'audio μ-law à Twilio par trames,
+ * puis attente de la durée de lecture (8000 bytes/s) — équivalent de l'attente
+ * de `response.done` sur le chemin OpenAI, pour que le garde STT reste actif.
+ */
+async function playTextAzureTts(twilioWs, session, text) {
+  if (!session.streamSid || twilioWs.readyState !== WebSocket.OPEN) {
+    throw new Error("Twilio WS not ready for Azure TTS playback");
+  }
+  const t0 = Date.now();
+  const { audio, firstByteTs } = await synthesizeAzureTts(text);
+
+  if (session.lastSpeechEndTs) {
+    console.log(
+      `⏱️ TTS latency (azure): fin parole patient -> premier byte audio = ${firstByteTs - session.lastSpeechEndTs}ms` +
+      ` (dont synthèse: ${firstByteTs - t0}ms)`
+    );
+    session.lastSpeechEndTs = null;
+  }
+
+  const FRAME_BYTES = 640; // 80 ms de μ-law 8kHz par message Twilio
+  for (let i = 0; i < audio.length; i += FRAME_BYTES) {
+    if (twilioWs.readyState !== WebSocket.OPEN) break;
+    twilioWs.send(
+      JSON.stringify({
+        event: "media",
+        streamSid: session.streamSid,
+        media: { payload: audio.subarray(i, i + FRAME_BYTES).toString("base64") },
+      })
+    );
+  }
+  const durationMs = Math.ceil(audio.length / 8);
+  console.log(`🔊 Azure TTS: ${audio.length} bytes envoyés à Twilio (~${durationMs}ms de lecture)`);
+
+  await sleep(durationMs);
 }
 
 function resetListeningBuffers(session) {
@@ -575,7 +698,24 @@ wss.on("connection", (ws) => {
   }
 
   /**
-   * Coupe le STT pendant toute la réponse audio OpenAI Realtime puis un délai après la fin (`TTS_POST_PLAY_MS`,
+   * Route le TTS selon `TTS_PROVIDER`. En mode "azure", fallback automatique sur
+   * OpenAI Realtime si Azure échoue ou ne renvoie pas le premier byte audio
+   * en moins de `AZURE_TTS_FIRST_BYTE_TIMEOUT_MS`.
+   */
+  async function playText(wsToUse, sessionToUse, text) {
+    if (TTS_PROVIDER === "azure") {
+      try {
+        await playTextAzureTts(wsToUse, sessionToUse, text);
+        return;
+      } catch (err) {
+        console.log("⚠️ Azure TTS KO, fallback OpenAI Realtime:", err?.message || err);
+      }
+    }
+    await playTextOpenAIRealtime(wsToUse, sessionToUse, text);
+  }
+
+  /**
+   * Coupe le STT pendant toute la réponse audio TTS puis un délai après la fin (`TTS_POST_PLAY_MS`,
    * défaut 1000 ms — évite de renvoyer l'audio synthétique au STT). Remet sttPaused à false ensuite.
    */
   function createPlayTextWithSttGuard(sleepFn, postPlayMs) {
@@ -584,7 +724,7 @@ wss.on("connection", (ws) => {
       sessionToUse.ttsPlaying = true;
       resetListeningBuffers(sessionToUse);
       try {
-        await playTextOpenAIRealtime(wsToUse, sessionToUse, text);
+        await playText(wsToUse, sessionToUse, text);
       } finally {
         await sleep(500);
         sessionToUse.ttsPlaying = false;
@@ -761,6 +901,12 @@ wss.on("connection", (ws) => {
           if (!rid || rid !== activeResponseId) return;
           const b64 = msg.delta;
           audioDeltaCount++;
+          if (audioDeltaCount === 1 && session.lastSpeechEndTs) {
+            console.log(
+              `⏱️ TTS latency (openai): fin parole patient -> premier byte audio = ${Date.now() - session.lastSpeechEndTs}ms`
+            );
+            session.lastSpeechEndTs = null;
+          }
           if (audioDeltaCount % 50 === 0) {
             console.log("🔊 audio delta passing", audioDeltaCount,
               "label=", activeResponseLabel);
@@ -815,6 +961,9 @@ wss.on("connection", (ws) => {
           if (session.listenReadyAt == null || Date.now() < session.listenReadyAt) return;
           if (session.lastTranscript === transcript) return;
           session.lastTranscript = transcript;
+          // Approximation de la fin de parole patient : réception du dernier
+          // segment transcrit (mis à jour à chaque segment, le dernier fait foi).
+          session.lastSpeechEndTs = Date.now();
           pushTranscriptChunk(transcript);
           return;
         }
@@ -934,6 +1083,8 @@ wss.on("connection", (ws) => {
     transcriptAttempts: 0,
     /** Segments filtrés (hallucination FR) d'affilée (réinitialisé après passage au STT réel). */
     consecutiveHallucinationStrikes: 0,
+    /** Timestamp de fin de parole patient (dernier segment transcrit) — pour les logs de latence TTS. */
+    lastSpeechEndTs: null,
     audioPacketCount: 0,
     allowAudio: false,
     didWelcome: false,
