@@ -105,6 +105,16 @@ const AZURE_TTS_OUTPUT_FORMAT = "raw-8khz-8bit-mono-mulaw";
 /** Twilio attend du μ-law 8 kHz : 160 octets = 20 ms (1 octet/échantillon à 8000 Hz). */
 const TWILIO_MULAW_FRAME_BYTES = 160;
 const TWILIO_MULAW_FRAME_MS = 20;
+/** Taille des chunks audio outbound vers Twilio (Twilio bufferise, taille libre). Rollback temps réel : 160. */
+const TWILIO_OUTBOUND_CHUNK_BYTES =
+  Number(process.env.TWILIO_OUTBOUND_CHUNK_BYTES) > 0
+    ? Number(process.env.TWILIO_OUTBOUND_CHUNK_BYTES)
+    : 800;
+/** Pause (ms) entre chunks outbound ; 0 = envoi au fil de l'eau, Twilio gère la restitution. Rollback temps réel : 20. */
+const TWILIO_OUTBOUND_PACING_MS =
+  Number(process.env.TWILIO_OUTBOUND_PACING_MS) >= 0
+    ? Number(process.env.TWILIO_OUTBOUND_PACING_MS)
+    : 5;
 /** Queue de silence μ-law (0xFF) ajoutée en fin d'audio Azure — évite les fins de phrase rognées. */
 const AZURE_TTS_SILENCE_TAIL_MS = 300;
 const AZURE_TTS_SILENCE_TAIL_BYTES = AZURE_TTS_SILENCE_TAIL_MS * 8;
@@ -355,7 +365,6 @@ async function playTextAzureTts(twilioWs, session, text) {
   }
 
   const FRAME_BYTES = TWILIO_MULAW_FRAME_BYTES;
-  const FRAME_MS = TWILIO_MULAW_FRAME_MS;
 
   // Queue de 300 ms de silence μ-law (0xFF) + padding de la dernière frame à 160 octets :
   // toutes les frames envoyées à Twilio sont pleines et la fin de phrase n'est plus rognée.
@@ -368,12 +377,16 @@ async function playTextAzureTts(twilioWs, session, text) {
   );
   audio = paddedAudio;
 
-  const totalFrames = Math.ceil(audio.length / FRAME_BYTES);
-  let framesSent = 0;
+  const CHUNK_BYTES = TWILIO_OUTBOUND_CHUNK_BYTES;
+  const PACING_MS = TWILIO_OUTBOUND_PACING_MS;
+  const totalChunks = Math.ceil(audio.length / CHUNK_BYTES);
+  let chunksSent = 0;
   let bytesSent = 0;
 
   session.turnTimings.twilioSendStart = Date.now();
-  console.log(`🔷 Azure TTS play: début envoi Twilio | frames=${totalFrames}`);
+  console.log(
+    `🔷 Azure TTS play: début envoi Twilio | chunks=${totalChunks} | chunkBytes=${CHUNK_BYTES} | pacingMs=${PACING_MS}`
+  );
 
   // Vide le buffer Twilio avant injection (évite collisions avec un flux précédent).
   try {
@@ -383,15 +396,15 @@ async function playTextAzureTts(twilioWs, session, text) {
     console.log("⚠️ Azure TTS play: clear Twilio ignoré:", clearErr?.message || clearErr);
   }
 
-  for (let i = 0; i < audio.length; i += FRAME_BYTES) {
+  for (let i = 0; i < audio.length; i += CHUNK_BYTES) {
     if (twilioWs.readyState !== WebSocket.OPEN) {
       console.log(
-        `⚠️ Azure TTS play ABORT: Twilio WS fermé | framesSent=${framesSent}/${totalFrames} | bytesSent=${bytesSent}/${audio.length} | wsState=${twilioWs.readyState}`
+        `⚠️ Azure TTS play ABORT: Twilio WS fermé | chunksSent=${chunksSent}/${totalChunks} | bytesSent=${bytesSent}/${audio.length} | wsState=${twilioWs.readyState}`
       );
       break;
     }
-    const frame = audio.subarray(i, i + FRAME_BYTES);
-    const payloadB64 = frame.toString("base64");
+    const chunk = audio.subarray(i, i + CHUNK_BYTES);
+    const payloadB64 = chunk.toString("base64");
     try {
       twilioWs.send(
         JSON.stringify({
@@ -400,25 +413,25 @@ async function playTextAzureTts(twilioWs, session, text) {
           media: { payload: payloadB64 },
         })
       );
-      framesSent += 1;
-      bytesSent += frame.length;
-      if (framesSent === 1) {
+      chunksSent += 1;
+      bytesSent += chunk.length;
+      if (chunksSent === 1) {
         const decodedLen = Buffer.from(payloadB64, "base64").length;
         console.log(
-          `🔷 Azure TTS frame #1 | frameBytes=${frame.length} | b64Len=${payloadB64.length} | decodedLen=${decodedLen} | headHex=${frame.subarray(0, Math.min(8, frame.length)).toString("hex")}`
+          `🔷 Azure TTS chunk #1 | chunkBytes=${chunk.length} | b64Len=${payloadB64.length} | decodedLen=${decodedLen} | headHex=${chunk.subarray(0, Math.min(8, chunk.length)).toString("hex")}`
         );
-      } else if (framesSent % 25 === 0 || framesSent === totalFrames) {
+      } else if (chunksSent % 25 === 0 || chunksSent === totalChunks) {
         console.log(
-          `🔷 Azure TTS frame #${framesSent}/${totalFrames} | frameBytes=${frame.length} | bytesSent=${bytesSent}/${audio.length}`
+          `🔷 Azure TTS chunk #${chunksSent}/${totalChunks} | chunkBytes=${chunk.length} | bytesSent=${bytesSent}/${audio.length}`
         );
       }
-      // Temporisation temps réel : Twilio rejette ou perd l'audio si toutes les trames arrivent d'un coup.
-      if (framesSent < totalFrames) {
-        await sleep(FRAME_MS);
+      // Twilio bufferise les payloads media : le pacing sert seulement à lisser le débit réseau sortant.
+      if (PACING_MS > 0 && chunksSent < totalChunks) {
+        await sleep(PACING_MS);
       }
     } catch (sendErr) {
       console.log(
-        `❌ Azure TTS play: erreur envoi frame #${framesSent + 1} | message=${sendErr?.message ?? sendErr}`
+        `❌ Azure TTS play: erreur envoi chunk #${chunksSent + 1} | message=${sendErr?.message ?? sendErr}`
       );
       throw sendErr;
     }
@@ -427,8 +440,9 @@ async function playTextAzureTts(twilioWs, session, text) {
   const durationMs = Math.ceil(audio.length / 8);
   const playbackComplete = bytesSent >= audio.length;
   session.turnTimings.twilioSendEnd = Date.now();
+  const twilioSendMs = session.turnTimings.twilioSendEnd - session.turnTimings.twilioSendStart;
   console.log(
-    `🔊 Azure TTS play: envoi Twilio terminé | framesSent=${framesSent}/${totalFrames} | frameSize=${FRAME_BYTES}B/${FRAME_MS}ms | bytesSent=${bytesSent}/${audio.length} | complete=${playbackComplete} | pacedSendMs≈${framesSent * FRAME_MS} | ~audioDurationMs=${durationMs} | totalMs=${Date.now() - t0}`
+    `🔊 Azure TTS play: envoi Twilio terminé | chunkBytes=${CHUNK_BYTES} | pacingMs=${PACING_MS} | chunksSent=${chunksSent}/${totalChunks} | bytesSent=${bytesSent}/${audio.length} | complete=${playbackComplete} | twilioSendMs=${twilioSendMs} | audioDurationMs=${durationMs} | totalMs=${Date.now() - t0}`
   );
 
   if (!playbackComplete) {
@@ -437,10 +451,13 @@ async function playTextAzureTts(twilioWs, session, text) {
     );
   }
 
-  // Fin de lecture mesurée par l'echo du mark Twilio (renvoyé une fois le buffer audio joué),
-  // avec timeout de secours pour ne jamais bloquer le pipeline.
+  // Fin de lecture mesurée par l'echo du mark Twilio (renvoyé une fois le buffer audio joué).
+  // L'envoi étant plus rapide que le temps réel, Twilio continue de jouer après le dernier chunk :
+  // l'attente couvre la lecture restante + la marge TWILIO_MARK_TIMEOUT_MS de secours.
   let markEchoed = false;
   if (twilioWs.readyState === WebSocket.OPEN) {
+    const remainingPlaybackMs = Math.max(0, durationMs - twilioSendMs);
+    const markWaitMs = remainingPlaybackMs + TWILIO_MARK_TIMEOUT_MS;
     const markName = `azure-tts-${Date.now()}`;
     const markWait = new Promise((resolve) => {
       session._pendingMark = { name: markName, resolve };
@@ -450,11 +467,11 @@ async function playTextAzureTts(twilioWs, session, text) {
         JSON.stringify({ event: "mark", streamSid: session.streamSid, mark: { name: markName } })
       );
       console.log(
-        `🔷 Azure TTS play: mark "${markName}" envoyé, attente echo (max ${TWILIO_MARK_TIMEOUT_MS}ms)`
+        `🔷 Azure TTS play: mark "${markName}" envoyé, attente echo (max ${markWaitMs}ms = lecture restante ${remainingPlaybackMs}ms + marge ${TWILIO_MARK_TIMEOUT_MS}ms)`
       );
       markEchoed = await Promise.race([
         markWait.then(() => true),
-        sleep(TWILIO_MARK_TIMEOUT_MS).then(() => false),
+        sleep(markWaitMs).then(() => false),
       ]);
     } catch (markErr) {
       console.log("⚠️ Azure TTS play: envoi mark échoué:", markErr?.message || markErr);
