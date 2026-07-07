@@ -90,10 +90,16 @@ const AZURE_SPEECH_KEY = String(process.env.AZURE_SPEECH_KEY || "").trim();
 const AZURE_SPEECH_REGION = String(process.env.AZURE_SPEECH_REGION || "").trim();
 const AZURE_TTS_VOICE = "fr-FR-DeniseNeural";
 const AZURE_TTS_STYLE = "cheerful";
-/** Délai max (ms) avant réception du premier byte audio Azure ; au-delà, fallback automatique sur OpenAI. */
-const AZURE_TTS_FIRST_BYTE_TIMEOUT_MS = 1200;
-/** Délai max (ms) pour la synthèse complète (téléchargement inclus) ; au-delà, abort + fallback OpenAI. */
-const AZURE_TTS_TOTAL_TIMEOUT_MS = 5000;
+/** Délai max (ms) avant réception du premier byte audio Azure ; au-delà, fallback automatique sur OpenAI. Configurable par env. */
+const AZURE_TTS_FIRST_BYTE_TIMEOUT_MS =
+  Number(process.env.AZURE_TTS_FIRST_BYTE_TIMEOUT_MS) > 0
+    ? Number(process.env.AZURE_TTS_FIRST_BYTE_TIMEOUT_MS)
+    : 2500;
+/** Délai max (ms) pour la synthèse complète (téléchargement inclus) ; au-delà, abort + fallback OpenAI. Configurable par env. */
+const AZURE_TTS_TOTAL_TIMEOUT_MS =
+  Number(process.env.AZURE_TTS_TOTAL_TIMEOUT_MS) > 0
+    ? Number(process.env.AZURE_TTS_TOTAL_TIMEOUT_MS)
+    : 6000;
 /** Format Azure REST — μ-law 8 kHz brut, sans en-tête RIFF (compatible Twilio Media Streams). */
 const AZURE_TTS_OUTPUT_FORMAT = "raw-8khz-8bit-mono-mulaw";
 /** Twilio attend du μ-law 8 kHz : 160 octets = 20 ms (1 octet/échantillon à 8000 Hz). */
@@ -118,7 +124,7 @@ if (TTS_PROVIDER === "azure" && (!AZURE_SPEECH_KEY || !AZURE_SPEECH_REGION)) {
 console.log(
   `🔊 TTS config at startup | TTS_PROVIDER=${TTS_PROVIDER}` +
     (TTS_PROVIDER === "azure"
-      ? ` | azureVoice=${AZURE_TTS_VOICE} | azureStyle=${AZURE_TTS_STYLE} | region=${AZURE_SPEECH_REGION || "MISSING"} | key=${AZURE_SPEECH_KEY ? "set" : "MISSING"}`
+      ? ` | azureVoice=${AZURE_TTS_VOICE} | azureStyle=${AZURE_TTS_STYLE} | region=${AZURE_SPEECH_REGION || "MISSING"} | key=${AZURE_SPEECH_KEY ? "set" : "MISSING"} | firstByteTimeout=${AZURE_TTS_FIRST_BYTE_TIMEOUT_MS}ms | totalTimeout=${AZURE_TTS_TOTAL_TIMEOUT_MS}ms`
       : " | provider=openai-realtime | voice=marin")
 );
 
@@ -217,7 +223,7 @@ async function synthesizeAzureTts(text) {
   const timer = setTimeout(() => {
     abortReason = "first-byte";
     console.log(
-      `⚠️ Azure TTS synthesize: abort (premier byte > ${AZURE_TTS_FIRST_BYTE_TIMEOUT_MS}ms, elapsed=${Date.now() - tStart}ms)`
+      `⚠️ Azure TTS TIMEOUT FIRST BYTE: abort (premier byte > ${AZURE_TTS_FIRST_BYTE_TIMEOUT_MS}ms, elapsed=${Date.now() - tStart}ms) -> fallback OpenAI`
     );
     controller.abort();
   }, AZURE_TTS_FIRST_BYTE_TIMEOUT_MS);
@@ -263,7 +269,7 @@ async function synthesizeAzureTts(text) {
         totalTimer = setTimeout(() => {
           abortReason = "total";
           console.log(
-            `⚠️ Azure TTS synthesize: abort (synthèse totale > ${AZURE_TTS_TOTAL_TIMEOUT_MS}ms)`
+            `⚠️ Azure TTS TIMEOUT TOTAL: abort (synthèse totale > ${AZURE_TTS_TOTAL_TIMEOUT_MS}ms, elapsed=${Date.now() - tStart}ms) -> fallback OpenAI`
           );
           controller.abort();
         }, Math.max(0, AZURE_TTS_TOTAL_TIMEOUT_MS - (Date.now() - tStart)));
