@@ -92,15 +92,22 @@ const AZURE_TTS_VOICE = "fr-FR-DeniseNeural";
 const AZURE_TTS_STYLE = "cheerful";
 /** Délai max (ms) avant réception du premier byte audio Azure ; au-delà, fallback automatique sur OpenAI. */
 const AZURE_TTS_FIRST_BYTE_TIMEOUT_MS = 1200;
+/** Délai max (ms) pour la synthèse complète (téléchargement inclus) ; au-delà, abort + fallback OpenAI. */
+const AZURE_TTS_TOTAL_TIMEOUT_MS = 5000;
 /** Format Azure REST — μ-law 8 kHz brut, sans en-tête RIFF (compatible Twilio Media Streams). */
 const AZURE_TTS_OUTPUT_FORMAT = "raw-8khz-8bit-mono-mulaw";
 /** Twilio attend du μ-law 8 kHz : 160 octets = 20 ms (1 octet/échantillon à 8000 Hz). */
 const TWILIO_MULAW_FRAME_BYTES = 160;
 const TWILIO_MULAW_FRAME_MS = 20;
+/** Queue de silence μ-law (0xFF) ajoutée en fin d'audio Azure — évite les fins de phrase rognées. */
+const AZURE_TTS_SILENCE_TAIL_MS = 300;
+const AZURE_TTS_SILENCE_TAIL_BYTES = AZURE_TTS_SILENCE_TAIL_MS * 8;
+/** Attente max de l'echo du mark Twilio signalant la fin de lecture du buffer audio. */
+const TWILIO_MARK_TIMEOUT_MS = 2000;
 
 const WELCOME_TEXT =
   String(process.env.WELCOME_TEXT || "").trim() ||
-  "Bonjour, cabinet du docteur Crichi. En cas d'urgence médicale, appelez le 15 immédiatement. Comment puis-je vous aider ?";
+  "Bonjour, cabinet du Dr Crichi. En cas d'urgence, appelez le 15. Comment puis-je vous aider ?";
 
 if (TTS_PROVIDER === "azure" && (!AZURE_SPEECH_KEY || !AZURE_SPEECH_REGION)) {
   console.log(
@@ -205,7 +212,10 @@ async function synthesizeAzureTts(text) {
   }
   const url = `https://${AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`;
   const controller = new AbortController();
+  let totalTimer = null;
+  let abortReason = null;
   const timer = setTimeout(() => {
+    abortReason = "first-byte";
     console.log(
       `⚠️ Azure TTS synthesize: abort (premier byte > ${AZURE_TTS_FIRST_BYTE_TIMEOUT_MS}ms, elapsed=${Date.now() - tStart}ms)`
     );
@@ -249,6 +259,14 @@ async function synthesizeAzureTts(text) {
           `🔷 Azure TTS premier byte | chunk=#${chunkIndex} bytes=${buf.length} | firstByteMs=${firstByteTs - tStart}`
         );
         clearTimeout(timer);
+        // Timeout premier byte levé ; on borne maintenant le téléchargement complet.
+        totalTimer = setTimeout(() => {
+          abortReason = "total";
+          console.log(
+            `⚠️ Azure TTS synthesize: abort (synthèse totale > ${AZURE_TTS_TOTAL_TIMEOUT_MS}ms)`
+          );
+          controller.abort();
+        }, Math.max(0, AZURE_TTS_TOTAL_TIMEOUT_MS - (Date.now() - tStart)));
       }
       if (chunkIndex <= 3 || chunkIndex % 20 === 0) {
         console.log(
@@ -274,11 +292,16 @@ async function synthesizeAzureTts(text) {
     );
     if (err?.stack) console.log(`❌ Azure TTS synthesize stack: ${err.stack}`);
     if (err?.name === "AbortError") {
-      throw new Error(`Azure TTS timeout (premier byte > ${AZURE_TTS_FIRST_BYTE_TIMEOUT_MS}ms)`);
+      throw new Error(
+        abortReason === "total"
+          ? `Azure TTS timeout (synthèse totale > ${AZURE_TTS_TOTAL_TIMEOUT_MS}ms)`
+          : `Azure TTS timeout (premier byte > ${AZURE_TTS_FIRST_BYTE_TIMEOUT_MS}ms)`
+      );
     }
     throw err;
   } finally {
     clearTimeout(timer);
+    if (totalTimer) clearTimeout(totalTimer);
   }
 }
 
@@ -289,6 +312,8 @@ async function synthesizeAzureTts(text) {
  */
 async function playTextAzureTts(twilioWs, session, text) {
   const t0 = Date.now();
+  session.turnTimings = session.turnTimings || {};
+  session.turnTimings.azureStart = t0;
   const textPreview = text.length > 100 ? `${text.slice(0, 100)}…` : text;
   console.log(
     `🔷 Azure TTS play START | streamSid=${session.streamSid ?? "n/a"} | wsState=${twilioWs.readyState} | chars=${text.length} | preview="${textPreview}"`
@@ -305,6 +330,8 @@ async function playTextAzureTts(twilioWs, session, text) {
   let firstByteTs;
   try {
     ({ audio, firstByteTs } = await synthesizeAzureTts(text));
+    session.turnTimings.azureFirstByte = firstByteTs;
+    session.turnTimings.azureSynthDone = Date.now();
     console.log(
       `🔷 Azure TTS play: synthèse OK | audioBytes=${audio.length} | synthMs=${Date.now() - t0}`
     );
@@ -323,9 +350,24 @@ async function playTextAzureTts(twilioWs, session, text) {
 
   const FRAME_BYTES = TWILIO_MULAW_FRAME_BYTES;
   const FRAME_MS = TWILIO_MULAW_FRAME_MS;
+
+  // Queue de 300 ms de silence μ-law (0xFF) + padding de la dernière frame à 160 octets :
+  // toutes les frames envoyées à Twilio sont pleines et la fin de phrase n'est plus rognée.
+  const paddedLen =
+    Math.ceil((audio.length + AZURE_TTS_SILENCE_TAIL_BYTES) / FRAME_BYTES) * FRAME_BYTES;
+  const paddedAudio = Buffer.alloc(paddedLen, 0xff);
+  audio.copy(paddedAudio, 0);
+  console.log(
+    `🔷 Azure TTS padding | audioBytes=${audio.length} | silence+pad=${paddedLen - audio.length} | total=${paddedLen}`
+  );
+  audio = paddedAudio;
+
   const totalFrames = Math.ceil(audio.length / FRAME_BYTES);
   let framesSent = 0;
   let bytesSent = 0;
+
+  session.turnTimings.twilioSendStart = Date.now();
+  console.log(`🔷 Azure TTS play: début envoi Twilio | frames=${totalFrames}`);
 
   // Vide le buffer Twilio avant injection (évite collisions avec un flux précédent).
   try {
@@ -378,6 +420,7 @@ async function playTextAzureTts(twilioWs, session, text) {
 
   const durationMs = Math.ceil(audio.length / 8);
   const playbackComplete = bytesSent >= audio.length;
+  session.turnTimings.twilioSendEnd = Date.now();
   console.log(
     `🔊 Azure TTS play: envoi Twilio terminé | framesSent=${framesSent}/${totalFrames} | frameSize=${FRAME_BYTES}B/${FRAME_MS}ms | bytesSent=${bytesSent}/${audio.length} | complete=${playbackComplete} | pacedSendMs≈${framesSent * FRAME_MS} | ~audioDurationMs=${durationMs} | totalMs=${Date.now() - t0}`
   );
@@ -388,11 +431,51 @@ async function playTextAzureTts(twilioWs, session, text) {
     );
   }
 
-  // Marge courte pour le jitter buffer Twilio (l'envoi est déjà temporisé frame par frame).
-  const tailMs = Math.max(0, durationMs - framesSent * FRAME_MS) + 100;
-  console.log(`🔷 Azure TTS play: attente fin lecture (~${tailMs}ms)`);
-  await sleep(tailMs);
-  console.log(`🔷 Azure TTS play DONE | totalMs=${Date.now() - t0}`);
+  // Fin de lecture mesurée par l'echo du mark Twilio (renvoyé une fois le buffer audio joué),
+  // avec timeout de secours pour ne jamais bloquer le pipeline.
+  let markEchoed = false;
+  if (twilioWs.readyState === WebSocket.OPEN) {
+    const markName = `azure-tts-${Date.now()}`;
+    const markWait = new Promise((resolve) => {
+      session._pendingMark = { name: markName, resolve };
+    });
+    try {
+      twilioWs.send(
+        JSON.stringify({ event: "mark", streamSid: session.streamSid, mark: { name: markName } })
+      );
+      console.log(
+        `🔷 Azure TTS play: mark "${markName}" envoyé, attente echo (max ${TWILIO_MARK_TIMEOUT_MS}ms)`
+      );
+      markEchoed = await Promise.race([
+        markWait.then(() => true),
+        sleep(TWILIO_MARK_TIMEOUT_MS).then(() => false),
+      ]);
+    } catch (markErr) {
+      console.log("⚠️ Azure TTS play: envoi mark échoué:", markErr?.message || markErr);
+    } finally {
+      session._pendingMark = null;
+    }
+  }
+  console.log(`🔷 Azure TTS play DONE | markEchoed=${markEchoed} | totalMs=${Date.now() - t0}`);
+  logLatencySummary(session);
+}
+
+/** Récapitulatif des latences du tour courant (les étapes non renseignées affichent n/a). */
+function logLatencySummary(session) {
+  const t = session.turnTimings;
+  if (!t) return;
+  const d = (a, b) => (t[a] != null && t[b] != null ? `${t[b] - t[a]}ms` : "n/a");
+  console.log(
+    `⏱️ LATENCY SUMMARY | speechEnd->transcriptFinal=${d("speechEnd", "transcriptFinal")}` +
+      ` | transcriptFinal->n8nStart=${d("transcriptFinal", "n8nStart")}` +
+      ` | n8n=${d("n8nStart", "n8nEnd")}` +
+      ` | n8nEnd->azureStart=${d("n8nEnd", "azureStart")}` +
+      ` | azureStart->firstByte=${d("azureStart", "azureFirstByte")}` +
+      ` | synthTotal=${d("azureStart", "azureSynthDone")}` +
+      ` | twilioSend=${d("twilioSendStart", "twilioSendEnd")}` +
+      ` | speechEnd->sendEnd=${d("speechEnd", "twilioSendEnd")}`
+  );
+  session.turnTimings = null;
 }
 
 function resetListeningBuffers(session) {
@@ -707,8 +790,11 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
     if (DEBUG_TRANSCRIPT) {
       console.log(`🐛 DEBUG_TRANSCRIPT: ${wordCount} mots | texte capté:`, transcript);
     }
+    session.turnTimings = session.turnTimings || {};
+    session.turnTimings.n8nStart = Date.now();
     console.log("🧠 Will call n8n now | transcript =", transcript);
     const brainJson = await callN8nForTurn({ transcript, session });
+    if (session.turnTimings) session.turnTimings.n8nEnd = Date.now();
     const action = brainJson?.action;
     const textToSpeak = brainJson?.text;
     const replyTextLen = typeof textToSpeak === "string" ? textToSpeak.length : 0;
@@ -1139,6 +1225,7 @@ wss.on("connection", (ws) => {
           // Approximation de la fin de parole patient : réception du dernier
           // segment transcrit (mis à jour à chaque segment, le dernier fait foi).
           session.lastSpeechEndTs = Date.now();
+          session.turnTimings = { speechEnd: session.lastSpeechEndTs };
           pushTranscriptChunk(transcript);
           return;
         }
@@ -1258,6 +1345,10 @@ wss.on("connection", (ws) => {
     consecutiveHallucinationStrikes: 0,
     /** Timestamp de fin de parole patient (dernier segment transcrit) — pour les logs de latence TTS. */
     lastSpeechEndTs: null,
+    /** Horodatages du tour courant (fin parole, n8n, Azure, envoi Twilio) pour le récap latence. */
+    turnTimings: null,
+    /** Mark Twilio en attente d'echo (fin de lecture de l'audio Azure). */
+    _pendingMark: null,
     audioPacketCount: 0,
     allowAudio: false,
     didWelcome: false,
@@ -1276,6 +1367,7 @@ wss.on("connection", (ws) => {
     const words = text ? text.split(/\s+/).length : 0;
 
     let delayMs = 1000;
+    let delayReason = "neutral";
 
     const endsWithEllipsis = text.endsWith("...");
     const endsWithNonTerminalPunct = /[,;:-]$/.test(text);
@@ -1287,7 +1379,14 @@ wss.on("connection", (ws) => {
       !endsWithTerminalPunct &&
       (endsWithEllipsis || endsWithNonTerminalPunct || (startsLikeQuestion && words < 9));
 
-    if (looksIncomplete) delayMs = 1400;
+    if (looksIncomplete) {
+      delayMs = 1400;
+      delayReason = "incomplete";
+    } else if (endsWithTerminalPunct && words >= 4) {
+      delayMs = 700;
+      delayReason = "terminal_punctuation";
+    }
+    console.log(`transcript_buffer_delay=${delayMs} reason=${delayReason}`);
 
     pendingTimer = setTimeout(() => {
       const finalText = pendingText.trim();
@@ -1295,6 +1394,8 @@ wss.on("connection", (ws) => {
       pendingTimer = null;
       const wc = finalText.split(/\s+/).filter(Boolean).length;
       if (wc < 2) return;
+      session.turnTimings = session.turnTimings || {};
+      session.turnTimings.transcriptFinal = Date.now();
       console.log(`📝 transcript tour final buffer (${wc} mots)`);
       void handleFinalUserTranscript(ws, session, finalText, playTextWithSttGuard, degradedFallback);
     }, delayMs);
@@ -1357,6 +1458,17 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    // MARK : echo du mark envoyé après l'audio Azure — Twilio a fini de jouer le buffer.
+    if (evt.event === "mark") {
+      const markName = evt.mark?.name;
+      if (session._pendingMark && session._pendingMark.name === markName) {
+        console.log(`🔷 mark echo Twilio reçu (${markName})`);
+        session._pendingMark.resolve();
+        session._pendingMark = null;
+      }
+      return;
+    }
+
     // MEDIA
     if (evt.event === "media") {
       if (!session.streamSid) return;
@@ -1402,6 +1514,12 @@ wss.on("connection", (ws) => {
     if (evt.event === "stop") {
       console.log("⏹️ stop", evt.stop);
       console.log(`✅ total media packets: ${session.mediaCount}`);
+
+      // Débloque une éventuelle attente de mark (l'appel se termine, l'echo ne viendra plus).
+      if (session._pendingMark) {
+        session._pendingMark.resolve();
+        session._pendingMark = null;
+      }
 
       if (pendingTimer) {
         clearTimeout(pendingTimer);
