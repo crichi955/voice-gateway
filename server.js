@@ -4,6 +4,7 @@ import express from "express";
 import multer from "multer";
 import http from "http";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import WebSocket, { WebSocketServer } from "ws";
 import nodemailer from "nodemailer";
 
@@ -120,6 +121,56 @@ const AZURE_TTS_SILENCE_TAIL_MS = 300;
 const AZURE_TTS_SILENCE_TAIL_BYTES = AZURE_TTS_SILENCE_TAIL_MS * 8;
 /** Attente max de l'echo du mark Twilio signalant la fin de lecture du buffer audio. */
 const TWILIO_MARK_TIMEOUT_MS = 2000;
+
+/** Tampon audio préenregistré ("Je vérifie.") joué pendant l'appel n8n. Opt-in explicite via env. */
+const ENABLE_TAMPON_AUDIO = process.env.ENABLE_TAMPON_AUDIO === "true";
+const TAMPON_AUDIO_PATH = String(process.env.TAMPON_AUDIO_PATH || "assets/tampon_je_verifie.ulaw").trim();
+
+/**
+ * Pré-check urgence local — patterns copiés verbatim du node n8n "BRAIN FAQ + INTENT".
+ * Codé en dur : aucune variable d'environnement ne peut désactiver ce comportement.
+ */
+const HARD_URGENCY_PATTERNS = [
+  /\bdouleur(s)?\s+(thoracique|poitrine)\b/i,
+  /\bmal\s+à\s+respirer\b/i,
+  /\bessouffl(é|ee|ée|ement)\b/i,
+  /\bdifficult(é|e)s?\s+respirer\b/i,
+  /\bperte\s+de\s+connaissance\b/i,
+  /\bmalaise\b/i,
+  /\b(avc|paralysie|visage\s+qui\s+tombe|trouble\s+de\s+la\s+parole)\b/i,
+  /\bhémorragie\b/i,
+];
+
+function isHardUrgency(normalized) {
+  const matched = HARD_URGENCY_PATTERNS.find((re) => re.test(normalized));
+  console.log(`[urgency] hard=${Boolean(matched)} matched=${matched ? matched.source : "none"}`);
+  return Boolean(matched);
+}
+
+/**
+ * Buffer μ-law brut du tampon, chargé au démarrage (padding à un multiple de 160 octets fait une
+ * seule fois ici). `null` si le fichier est absent/vide — le tampon est alors ignoré (missing_audio).
+ * Le fichier est du raw mu-law 8kHz 8-bit mono, jamais parsé comme un WAV.
+ */
+let TAMPON_AUDIO_BUFFER = null;
+try {
+  const rawTampon = readFileSync(TAMPON_AUDIO_PATH);
+  if (rawTampon.length) {
+    const paddedTamponLen =
+      Math.ceil(rawTampon.length / TWILIO_MULAW_FRAME_BYTES) * TWILIO_MULAW_FRAME_BYTES;
+    const paddedTampon = Buffer.alloc(paddedTamponLen, 0xff);
+    rawTampon.copy(paddedTampon, 0);
+    TAMPON_AUDIO_BUFFER = paddedTampon;
+    console.log(`[tampon] loaded bytes=${paddedTampon.length} (raw=${rawTampon.length}, path=${TAMPON_AUDIO_PATH})`);
+  } else {
+    console.log(`[tampon] fichier vide (${TAMPON_AUDIO_PATH}) — lectures ignorées (missing_audio)`);
+  }
+} catch (err) {
+  console.log(
+    `[tampon] chargement impossible (${TAMPON_AUDIO_PATH}): ${err?.message || err} — lectures ignorées (missing_audio)`
+  );
+}
+console.log(`[tampon] config enabled=${ENABLE_TAMPON_AUDIO} path=${TAMPON_AUDIO_PATH} loaded=${TAMPON_AUDIO_BUFFER != null}`);
 
 const WELCOME_TEXT =
   String(process.env.WELCOME_TEXT || "").trim() ||
@@ -501,6 +552,111 @@ function logLatencySummary(session) {
   session.turnTimings = null;
 }
 
+/**
+ * Envoi du tampon préenregistré vers Twilio. Boucle volontairement dupliquée depuis
+ * playTextAzureTts (non mutualisée : la boucle Azure a été durement déboguée et le buffer du
+ * tampon est fixe, connu à l'avance). Retourne la durée audio (ms) une fois l'envoi terminé
+ * et — si waitForMark — l'echo mark Twilio reçu (fin de lecture réelle côté Twilio).
+ */
+async function sendTamponToTwilio(
+  twilioWs,
+  session,
+  audioBuffer,
+  { label = "TAMPON", clearBefore = true, waitForMark = true } = {}
+) {
+  if (!session.streamSid || twilioWs.readyState !== WebSocket.OPEN) {
+    throw new Error(`${label}: Twilio WS non prêt (streamSid=${session.streamSid || "none"})`);
+  }
+
+  const totalChunks = Math.ceil(audioBuffer.length / TWILIO_OUTBOUND_CHUNK_BYTES);
+  const durationMs = Math.ceil(audioBuffer.length / 8); // μ-law 8kHz : 8 octets = 1 ms
+  const sendStart = Date.now();
+
+  if (clearBefore) {
+    try {
+      twilioWs.send(JSON.stringify({ event: "clear", streamSid: session.streamSid }));
+    } catch (clearErr) {
+      console.log(`⚠️ ${label}: clear Twilio ignoré:`, clearErr?.message || clearErr);
+    }
+  }
+
+  let chunksSent = 0;
+  for (let i = 0; i < audioBuffer.length; i += TWILIO_OUTBOUND_CHUNK_BYTES) {
+    if (twilioWs.readyState !== WebSocket.OPEN) {
+      console.log(`⚠️ ${label}: envoi interrompu, Twilio WS fermé (chunksSent=${chunksSent}/${totalChunks})`);
+      break;
+    }
+    twilioWs.send(
+      JSON.stringify({
+        event: "media",
+        streamSid: session.streamSid,
+        media: { payload: audioBuffer.subarray(i, i + TWILIO_OUTBOUND_CHUNK_BYTES).toString("base64") },
+      })
+    );
+    chunksSent += 1;
+    if (TWILIO_OUTBOUND_PACING_MS > 0 && chunksSent < totalChunks) {
+      await sleep(TWILIO_OUTBOUND_PACING_MS);
+    }
+  }
+
+  const sendMs = Date.now() - sendStart;
+
+  if (waitForMark && twilioWs.readyState === WebSocket.OPEN) {
+    // Le tampon n'est "terminé" qu'à l'echo mark : la lecture réelle côté Twilio dure plus
+    // longtemps que l'envoi bufferisé, et un clear prématuré couperait l'audio en cours.
+    const remainingPlaybackMs = Math.max(0, durationMs - sendMs);
+    const markWaitMs = remainingPlaybackMs + TWILIO_MARK_TIMEOUT_MS;
+    const markName = `tampon-${Date.now()}`;
+    const markWait = new Promise((resolve) => {
+      session._pendingMark = { name: markName, resolve };
+    });
+    try {
+      twilioWs.send(
+        JSON.stringify({ event: "mark", streamSid: session.streamSid, mark: { name: markName } })
+      );
+      await Promise.race([markWait, sleep(markWaitMs)]);
+    } catch (markErr) {
+      console.log(`⚠️ ${label}: envoi mark échoué:`, markErr?.message || markErr);
+    } finally {
+      if (session._pendingMark?.name === markName) {
+        session._pendingMark = null;
+      }
+    }
+  }
+
+  return durationMs;
+}
+
+/**
+ * Joue le tampon "Je vérifie." si autorisé. Ne retourne qu'une fois la lecture terminée
+ * (echo mark inclus) — garantit zéro superposition avec la réponse finale. Toute erreur est
+ * absorbée : le tampon ne doit jamais faire échouer le tour.
+ */
+async function playTamponIfAllowed(twilioWs, session, isHard) {
+  if (isHard) {
+    console.log("[tampon] skipped reason=hard_urgency");
+    return;
+  }
+  if (!ENABLE_TAMPON_AUDIO) {
+    console.log("[tampon] skipped reason=disabled");
+    return;
+  }
+  if (!TAMPON_AUDIO_BUFFER) {
+    console.log("[tampon] skipped reason=missing_audio");
+    return;
+  }
+  try {
+    const durationMs = await sendTamponToTwilio(twilioWs, session, TAMPON_AUDIO_BUFFER, {
+      label: "TAMPON",
+      clearBefore: true,
+      waitForMark: true,
+    });
+    console.log(`[tampon] played durationMs=${durationMs}`);
+  } catch (err) {
+    console.log("[tampon] erreur lecture (non bloquant):", err?.message || err);
+  }
+}
+
 function resetListeningBuffers(session) {
   session.lastFlushTs = Date.now();
 }
@@ -815,9 +971,22 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
     }
     session.turnTimings = session.turnTimings || {};
     session.turnTimings.n8nStart = Date.now();
+
+    const normalizedForUrgency = transcript.toLowerCase().trim();
+    const hardUrgency = isHardUrgency(normalizedForUrgency);
+
     console.log("🧠 Will call n8n now | transcript =", transcript);
-    const brainJson = await callN8nForTurn({ transcript, session });
+    const n8nPromise = callN8nForTurn({ transcript, session }).then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error })
+    );
+
+    await playTamponIfAllowed(ws, session, hardUrgency);
+
+    const settled = await n8nPromise;
     if (session.turnTimings) session.turnTimings.n8nEnd = Date.now();
+    if (!settled.ok) throw settled.error;
+    const brainJson = settled.value;
     const action = brainJson?.action;
     const textToSpeak = brainJson?.text;
     const replyTextLen = typeof textToSpeak === "string" ? textToSpeak.length : 0;
@@ -1481,14 +1650,16 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    // MARK : echo du mark envoyé après l'audio Azure — Twilio a fini de jouer le buffer.
+    // MARK : echo du mark envoyé après l'audio Azure/tampon — Twilio a fini de jouer le buffer.
     if (evt.event === "mark") {
       const markName = evt.mark?.name;
-      if (session._pendingMark && session._pendingMark.name === markName) {
-        console.log(`🔷 mark echo Twilio reçu (${markName})`);
-        session._pendingMark.resolve();
-        session._pendingMark = null;
+      const pending = session._pendingMark;
+      if (!pending || pending.name !== markName) {
+        return;
       }
+      console.log(`🔷 mark echo Twilio reçu (${markName})`);
+      pending.resolve();
+      session._pendingMark = null;
       return;
     }
 
