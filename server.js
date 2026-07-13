@@ -1618,11 +1618,20 @@ wss.on("connection", (ws) => {
     if (evt.event === "start") {
       console.log("TWILIO START RAW:", JSON.stringify(evt.start, null, 2));
       console.log("TWILIO START CUSTOM PARAMS:", JSON.stringify(evt.start?.customParameters || {}, null, 2));
-      session.callSid = evt.start?.callSid || evt.start?.call_sid || null;
+      const customParams = evt.start?.customParameters || {};
+      session.callSid = customParams.callSid || evt.start?.callSid || evt.start?.call_sid || null;
       session.streamSid = evt.streamSid || evt.start?.streamSid || null;
       const caller = session.callSid ? callSidToCaller.get(session.callSid) : null;
-      session.fromNumber = caller?.from || null;
+      session.fromNumber = customParams.callerNumber || caller?.from || session.fromNumber || null;
+      session.calledNumber = customParams.calledNumber || session.calledNumber || null;
       session.patientName = caller?.name || null;
+
+      console.log("📞 caller resolved", {
+        fromNumber: session.fromNumber,
+        calledNumber: session.calledNumber,
+        callSid: session.callSid,
+        source: customParams.callerNumber ? "customParameters" : caller?.from ? "callSidToCaller" : "missing"
+      });
 
       console.log("▶️ start", { callSid: session.callSid, streamSid: session.streamSid });
 
