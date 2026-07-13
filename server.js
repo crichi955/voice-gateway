@@ -1616,6 +1616,8 @@ wss.on("connection", (ws) => {
 
     // START
     if (evt.event === "start") {
+      console.log("TWILIO START RAW:", JSON.stringify(evt.start, null, 2));
+      console.log("TWILIO START CUSTOM PARAMS:", JSON.stringify(evt.start?.customParameters || {}, null, 2));
       session.callSid = evt.start?.callSid || evt.start?.call_sid || null;
       session.streamSid = evt.streamSid || evt.start?.streamSid || null;
       const caller = session.callSid ? callSidToCaller.get(session.callSid) : null;
