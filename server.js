@@ -973,12 +973,23 @@ async function handleFinalUserTranscript(ws, session, transcript, playTextWithSt
       console.log(`🐛 DEBUG_TRANSCRIPT: ${wordCount} mots | texte capté:`, transcript);
     }
     session.turnTimings = session.turnTimings || {};
-    session.turnTimings.n8nStart = Date.now();
-
     const normalizedForUrgency = transcript.toLowerCase().trim();
     const hardUrgency = isHardUrgency(normalizedForUrgency);
 
+    if (hardUrgency) {
+      console.log("[urgency] local hard response, skipping n8n");
+      session.n8nInFlight = false;
+      session.responded = true;
+      await playTextWithSttGuard(
+        ws,
+        session,
+        "En cas de douleur thoracique, de difficulté à respirer, de malaise important ou de signe d'urgence vitale, appelez immédiatement le 15 ou le 112."
+      );
+      return;
+    }
+
     console.log("🧠 Will call n8n now | transcript =", transcript);
+    session.turnTimings.n8nStart = Date.now();
     const n8nPromise = callN8nForTurn({ transcript, session }).then(
       (value) => ({ ok: true, value }),
       (error) => ({ ok: false, error })
