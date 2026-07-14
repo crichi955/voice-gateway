@@ -691,18 +691,7 @@ function scheduleAudioInactivityCommit(session) {
       console.log("[stt] audio inactivity commit skipped reason=no_pending_packets");
       return;
     }
-    if (session.sttPaused) {
-      console.log("[stt] audio inactivity commit skipped reason=stt_paused");
-      return;
-    }
-    if (session.responded) {
-      console.log("[stt] audio inactivity commit skipped reason=responded");
-      return;
-    }
-    if (session.n8nInFlight) {
-      console.log("[stt] audio inactivity commit skipped reason=n8n_in_flight");
-      return;
-    }
+    // Pending packets were already accepted before STT pause; commit them to avoid truncation.
     const packets = session.audioPacketCount;
     try {
       oaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
