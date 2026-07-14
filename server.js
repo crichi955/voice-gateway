@@ -131,14 +131,17 @@ const TAMPON_AUDIO_PATH = String(process.env.TAMPON_AUDIO_PATH || "assets/tampon
  * Codé en dur : aucune variable d'environnement ne peut désactiver ce comportement.
  */
 const HARD_URGENCY_PATTERNS = [
-  /\bdouleur(s)?\s+(thoracique|poitrine)\b/i,
-  /\bmal\s+à\s+respirer\b/i,
-  /\bessouffl(é|ee|ée|ement)\b/i,
-  /\bdifficult(é|e)s?\s+respirer\b/i,
+  /\bdouleur(s)?\s+(thoracique|poitrine|[àa]\s+la\s+poitrine|dans\s+la\s+poitrine)\b/i,
+  /\b(mal|serrement|oppression|g[êe]ne)\s+(thoracique|poitrine|[àa]\s+la\s+poitrine|dans\s+la\s+poitrine)\b/i,
+  /\bmal\s+[àa]\s+respirer\b/i,
+  /\bg[êe]ne\s+respiratoire\b/i,
+  /\bessouffl(é|ée|ee|e|ement)\b/i,
+  /\bdifficult(é|e)s?\s+(?:[àa]\s+)?respirer\b/i,
+  /\b(?:je\s+)?respire\s+(mal|plus|pas)\b/i,
   /\bperte\s+de\s+connaissance\b/i,
-  /\bmalaise\b/i,
+  /\bmalaise\s+(important|grave|avec\s+perte\s+de\s+connaissance)\b/i,
   /\b(avc|paralysie|visage\s+qui\s+tombe|trouble\s+de\s+la\s+parole)\b/i,
-  /\bhémorragie\b/i,
+  /\bh[ée]morragie\b/i,
 ];
 
 function isHardUrgency(normalized) {
