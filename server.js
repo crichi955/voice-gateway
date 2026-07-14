@@ -85,6 +85,12 @@ app.get("/debug-ulaw", async (req, res) => {
 /** Nombre minimum de mots (tour transcription OpenAI Realtime) avant envoi à n8n — défaut 2. */
 const STT_MIN_WORDS_FOR_N8N = Math.max(1, Math.floor(Number(process.env.STT_MIN_WORDS_FOR_N8N ?? 2)) || 2);
 
+/** Délai sans paquet audio Twilio avant commit forcé du buffer OpenAI STT — défaut 650 ms. */
+const STT_AUDIO_INACTIVITY_COMMIT_MS =
+  Number(process.env.STT_AUDIO_INACTIVITY_COMMIT_MS) > 0
+    ? Number(process.env.STT_AUDIO_INACTIVITY_COMMIT_MS)
+    : 650;
+
 /** Provider TTS pour les réponses n8n : "openai" (défaut, comportement actuel) ou "azure" (Azure Neural TTS). */
 const TTS_PROVIDER = String(process.env.TTS_PROVIDER || "openai").trim().toLowerCase();
 const AZURE_SPEECH_KEY = String(process.env.AZURE_SPEECH_KEY || "").trim();
@@ -662,6 +668,50 @@ async function playTamponIfAllowed(twilioWs, session, isHard) {
 
 function resetListeningBuffers(session) {
   session.lastFlushTs = Date.now();
+}
+
+function clearAudioInactivityCommitTimer(session) {
+  if (session._audioInactivityCommitTimer) {
+    clearTimeout(session._audioInactivityCommitTimer);
+    session._audioInactivityCommitTimer = null;
+  }
+}
+
+/** Planifie un commit OpenAI si aucun paquet audio entrant pendant STT_AUDIO_INACTIVITY_COMMIT_MS. */
+function scheduleAudioInactivityCommit(session) {
+  clearAudioInactivityCommitTimer(session);
+  session._audioInactivityCommitTimer = setTimeout(() => {
+    session._audioInactivityCommitTimer = null;
+    const oaiWs = session.openAiWs;
+    if (!oaiWs || oaiWs.readyState !== WebSocket.OPEN) {
+      console.log("[stt] audio inactivity commit skipped reason=openai_ws_not_ready");
+      return;
+    }
+    if (session.audioPacketCount <= 0) {
+      console.log("[stt] audio inactivity commit skipped reason=no_pending_packets");
+      return;
+    }
+    if (session.sttPaused) {
+      console.log("[stt] audio inactivity commit skipped reason=stt_paused");
+      return;
+    }
+    if (session.responded) {
+      console.log("[stt] audio inactivity commit skipped reason=responded");
+      return;
+    }
+    if (session.n8nInFlight) {
+      console.log("[stt] audio inactivity commit skipped reason=n8n_in_flight");
+      return;
+    }
+    const packets = session.audioPacketCount;
+    try {
+      oaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+      session.audioPacketCount = 0;
+      console.log(`[stt] audio inactivity commit sent packets=${packets}`);
+    } catch (err) {
+      console.log("[stt] audio inactivity commit skipped reason=send_error", err?.message || err);
+    }
+  }, STT_AUDIO_INACTIVITY_COMMIT_MS);
 }
 
 function toWhatsAppTo(fromNumber) {
@@ -1719,8 +1769,11 @@ wss.on("connection", (ws) => {
         );
         session.audioPacketCount += 1;
         if (session.audioPacketCount >= 100) {
+          clearAudioInactivityCommitTimer(session);
           session.audioPacketCount = 0;
           oaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        } else {
+          scheduleAudioInactivityCommit(session);
         }
       } catch (err) {
         console.log("❌ OpenAI input_audio_buffer.append error:", err?.message || err);
@@ -1745,6 +1798,7 @@ wss.on("connection", (ws) => {
         pendingTimer = null;
       }
       pendingText = "";
+      clearAudioInactivityCommitTimer(session);
 
       if (session.openAiWs) {
         try {
@@ -1760,6 +1814,7 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     console.log("❌ Twilio WS closed");
+    clearAudioInactivityCommitTimer(session);
     if (session.openAiWs) {
       try {
         session.openAiWs.close();
