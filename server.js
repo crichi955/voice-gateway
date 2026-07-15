@@ -91,6 +91,12 @@ const STT_AUDIO_INACTIVITY_COMMIT_MS =
     ? Number(process.env.STT_AUDIO_INACTIVITY_COMMIT_MS)
     : 650;
 
+/** Délai transcript buffer minimum tant que de l'audio est encore en attente de commit OpenAI — défaut 2200 ms. */
+const STT_WAIT_FOR_INACTIVITY_TRANSCRIPT_MS =
+  Number(process.env.STT_WAIT_FOR_INACTIVITY_TRANSCRIPT_MS) > 0
+    ? Number(process.env.STT_WAIT_FOR_INACTIVITY_TRANSCRIPT_MS)
+    : 2200;
+
 /** Provider TTS pour les réponses n8n : "openai" (défaut, comportement actuel) ou "azure" (Azure Neural TTS). */
 const TTS_PROVIDER = String(process.env.TTS_PROVIDER || "openai").trim().toLowerCase();
 const AZURE_SPEECH_KEY = String(process.env.AZURE_SPEECH_KEY || "").trim();
@@ -1630,6 +1636,10 @@ wss.on("connection", (ws) => {
     } else if (endsWithTerminalPunct && words >= 4) {
       delayMs = 700;
       delayReason = "terminal_punctuation";
+    }
+    if (session.audioPacketCount > 0 || session._audioInactivityCommitTimer) {
+      delayMs = Math.max(delayMs, STT_WAIT_FOR_INACTIVITY_TRANSCRIPT_MS);
+      delayReason = "waiting_for_audio_inactivity_commit";
     }
     console.log(`transcript_buffer_delay=${delayMs} reason=${delayReason}`);
 
