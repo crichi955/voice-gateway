@@ -1466,7 +1466,10 @@ wss.on("connection", (ws) => {
           const transcript = (msg.transcript || "").trim();
           console.log("📝 transcript reçu:", transcript);
           const wc = transcript.trim().split(/\s+/).filter(Boolean).length;
-          if (wc < 2) return;
+          if (wc < 2) {
+            if (!pendingText.trim()) return;
+            console.log("[stt] accepting one-word continuation transcript:", transcript);
+          }
           if (!getValidN8nBrainUrl()) return;
           if (!session.streamSid) return;
           if (session.sttPaused || session.responded) return;
