@@ -1465,6 +1465,10 @@ wss.on("connection", (ws) => {
           if (session.sttPaused) return;
           const transcript = (msg.transcript || "").trim();
           console.log("📝 transcript reçu:", transcript);
+          if (!transcript) {
+            console.log("[stt] empty transcript skipped");
+            return;
+          }
           const wc = transcript.trim().split(/\s+/).filter(Boolean).length;
           if (wc < 2) {
             if (!pendingText.trim()) return;
